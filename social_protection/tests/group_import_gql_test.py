@@ -84,7 +84,7 @@ class GroupBeneficiaryImportGQLTest(openIMISGraphQLTestCase, TaskDataMixin):
         # Prepare the payload
         data = {
             "file": csv_file,
-            "benefit_plan": "7b5c1699-9ba8-4d53-9a70-183be61f009c",
+            "benefit_plan": str(self.benefit_plan.id),
             "workflow_name": "Python Beneficiaries Upload",
             "workflow_group": "socialProtection",
             "group_aggregation_column": "groupId",
