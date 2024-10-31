@@ -2,6 +2,7 @@
 Functionalities shared between different python workflows.
 
 """
+import json
 import logging
 from abc import ABCMeta, abstractmethod
 from typing import Iterable
@@ -53,7 +54,8 @@ class BasePythonWorkflowExecutor(metaclass=ABCMeta):
         4. If action is data upload then 'ID' unique identifier is required as well.
         """
         df_headers = set(self.df.columns)
-        schema_properties = set(self.schema.get('properties', {}).keys())
+        schema = json.loads(self.schema)
+        schema_properties = set(schema.get('properties', {}).keys())
         required_headers = {'first_name', 'last_name', 'dob', 'id'}
         if is_update:
             required_headers.add('ID')

@@ -14,7 +14,7 @@ from individual.apps import IndividualConfig
 from individual.models import IndividualDataSource
 from social_protection.apps import SocialProtectionConfig
 from social_protection.models import BenefitPlan
-from social_protection.services import BeneficiaryImportService
+from social_protection.services import BeneficiaryImportService, GroupBeneficiaryImportService
 from workflow.services import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,15 @@ def import_beneficiaries(request):
         user = request.user
         import_file, workflow, benefit_plan, group_aggregation_column = _resolve_import_beneficiaries_args(request)
         _handle_file_upload(import_file, benefit_plan)
-        result = BeneficiaryImportService(user).import_beneficiaries(
-            import_file, benefit_plan, workflow, group_aggregation_column
-        )
+        if benefit_plan.type == BenefitPlan.BenefitPlanType.INDIVIDUAL_TYPE:
+            result = BeneficiaryImportService(user).import_beneficiaries(
+                import_file, benefit_plan, workflow, group_aggregation_column
+            )
+        else:
+            raise NotImplementedError(_("cannot updload groups"))
+            result = GroupBeneficiaryImportService(user).import_beneficiaries(
+                import_file, benefit_plan, workflow, group_aggregation_column
+            )
         if not result.get('success'):
             raise ValueError('{}: {}'.format(result.get("message"), result.get("details")))
 
@@ -223,8 +229,11 @@ def _resolve_import_beneficiaries_args(request):
         raise ValueError(f'Workflow name not provided')
     if not workflow_group:
         raise ValueError(f'Workflow group not provided')
+    benefit_plan = BenefitPlan.objects.filter(id=benefit_plan_uuid).first()
+    if not benefit_plan:
+        raise ValueError('Benefit Plan not found: {}'.format(benefit_plan_uuid))
     if (group_aggregation_column and
-            BenefitPlan.objects.filter(uuid=benefit_plan_uuid).first().type != BenefitPlan.BenefitPlanType.GROUP_TYPE):
+            benefit_plan.type != BenefitPlan.BenefitPlanType.GROUP_TYPE):
         raise ValueError(f'Group aggregation only for group type benefit plans')
 
     result = WorkflowService.get_workflows(workflow_name, workflow_group)
@@ -239,10 +248,7 @@ def _resolve_import_beneficiaries_args(request):
         raise ValueError('Multiple workflows found: group={} name={}'.format(workflow_group, workflow_name))
 
     workflow = workflows[0]
-    benefit_plan = BenefitPlan.objects.filter(uuid=benefit_plan_uuid).first()
 
-    if not benefit_plan:
-        raise ValueError('Benefit Plan not found: {}'.format(benefit_plan_uuid))
 
     return import_file, workflow, benefit_plan, group_aggregation_column
 
