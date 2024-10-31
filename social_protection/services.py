@@ -512,3 +512,8 @@ class BeneficiaryTaskCreatorService:
 
         percentage_of_invalid_items = round(percentage_of_invalid_items, 2)
         return percentage_of_invalid_items
+
+
+class GroupBeneficiaryImportService(BeneficiaryImportService):
+    pass
+    # TODO: create workflow upload/update groups and use it here

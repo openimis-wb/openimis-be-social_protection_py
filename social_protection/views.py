@@ -14,7 +14,7 @@ from individual.apps import IndividualConfig
 from individual.models import IndividualDataSource
 from social_protection.apps import SocialProtectionConfig
 from social_protection.models import BenefitPlan
-from social_protection.services import BeneficiaryImportService
+from social_protection.services import BeneficiaryImportService, GroupBeneficiaryImportService
 from workflow.services import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,15 @@ def import_beneficiaries(request):
         user = request.user
         import_file, workflow, benefit_plan, group_aggregation_column = _resolve_import_beneficiaries_args(request)
         _handle_file_upload(import_file, benefit_plan)
-        result = BeneficiaryImportService(user).import_beneficiaries(
-            import_file, benefit_plan, workflow, group_aggregation_column
-        )
+        if benefit_plan.type == BenefitPlan.BenefitPlanType.INDIVIDUAL_TYPE:
+            result = BeneficiaryImportService(user).import_beneficiaries(
+                import_file, benefit_plan, workflow, group_aggregation_column
+            )
+        else:
+            raise NotImplementedError(_("cannot updload groups"))
+            result = GroupBeneficiaryImportService(user).import_beneficiaries(
+                import_file, benefit_plan, workflow, group_aggregation_column
+            )
         if not result.get('success'):
             raise ValueError('{}: {}'.format(result.get("message"), result.get("details")))
 
