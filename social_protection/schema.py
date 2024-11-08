@@ -9,7 +9,7 @@ from django.utils.translation import gettext as _
 from core.custom_filters import CustomFilterWizardStorage
 from core.gql_queries import ValidationMessageGQLType
 from core.schema import OrderedDjangoFilterConnectionField
-from core.service import wait_for_mutation
+from core.services import wait_for_mutation
 from core.utils import append_validity_filter, validate_json_schema
 from social_protection.apps import SocialProtectionConfig
 from social_protection.gql_mutations import (
