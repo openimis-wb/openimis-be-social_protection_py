@@ -9,6 +9,7 @@ from django.utils.translation import gettext as _
 from core.custom_filters import CustomFilterWizardStorage
 from core.gql_queries import ValidationMessageGQLType
 from core.schema import OrderedDjangoFilterConnectionField
+from core.services import wait_for_mutation
 from core.utils import append_validity_filter, validate_json_schema
 from social_protection.apps import SocialProtectionConfig
 from social_protection.gql_mutations import (
@@ -178,6 +179,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
 
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
+            wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         individual_id = kwargs.get("individual_id", None)
@@ -353,6 +355,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
 
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
+            wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         Query._check_permissions(
@@ -367,6 +370,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
 
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
+            wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         Query._check_permissions(
@@ -409,6 +413,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
 
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
+            wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         individual_id = kwargs.get("individual_id", None)
