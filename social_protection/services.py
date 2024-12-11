@@ -89,10 +89,27 @@ class BeneficiaryService(BaseService, CheckerLogicServiceMixin):
     @register_service_signal('beneficiary_service.create')
     def create(self, obj_data):
         return super().create(obj_data)
+    
+    def update_would_exceed_max_active_beneficiaries(self, benefit_plan_id, id, status):
+        benefit_plan = BenefitPlan.objects.get(id=benefit_plan_id)
+        if benefit_plan and status == "ACTIVE" and id:
+            max_active_beneficiaries = benefit_plan.max_beneficiaries
+            active_beneficiaries = Beneficiary.objects.filter(is_deleted=False, benefit_plan_id=benefit_plan_id, status="ACTIVE").distinct()
+            return active_beneficiaries.count() == max_active_beneficiaries and not active_beneficiaries.filter(id=id).exists()
+        return False
 
     @register_service_signal('beneficiary_service.update')
     def update(self, obj_data):
-        return super().update(obj_data)
+        try:
+            status = obj_data.get("status", None)
+            benefit_plan_id = obj_data.get("benefit_plan_id", None)
+            id = obj_data.get('id', None)
+
+            if self.update_would_exceed_max_active_beneficiaries(benefit_plan_id, id, status):
+                raise ValueError(f"Error changing beneficiary to active status. Benefit plan is already at max active beneficiaries")
+            return super().update(obj_data)
+        except Exception as exc:
+            return output_exception(model_name=self.OBJECT_TYPE.__name__, method="update", exception=exc)
 
     @register_service_signal('beneficiary_service.delete')
     def delete(self, obj_data):
@@ -127,9 +144,26 @@ class GroupBeneficiaryService(BaseService, CheckerLogicServiceMixin):
     def create(self, obj_data):
         return super().create(obj_data)
 
+    def update_would_exceed_max_active_beneficiaries(self, benefit_plan_id, id, status):
+        benefit_plan = BenefitPlan.objects.get(id=benefit_plan_id)
+        if benefit_plan and status == "ACTIVE" and id:
+            max_active_beneficiaries = benefit_plan.max_beneficiaries
+            active_beneficiaries = GroupBeneficiary.objects.filter(is_deleted=False, benefit_plan_id=benefit_plan_id, status="ACTIVE").distinct()
+            return active_beneficiaries.count() == max_active_beneficiaries and not active_beneficiaries.filter(id=id).exists()
+        return False
+
     @register_service_signal('group_beneficiary_service.update')
     def update(self, obj_data):
-        return super().update(obj_data)
+        try:
+            status = obj_data.get("status", None)
+            benefit_plan_id = obj_data.get("benefit_plan_id", None)
+            id = obj_data.get('id', None)
+
+            if self.update_would_exceed_max_active_beneficiaries(benefit_plan_id, id, status):
+                raise ValueError(f"Error changing beneficiary to active status. Benefit plan is already at max active beneficiaries")
+            return super().update(obj_data)
+        except Exception as exc:
+            return output_exception(model_name=self.OBJECT_TYPE.__name__, method="update", exception=exc)
 
     @register_service_signal('group_beneficiary_service.delete')
     def delete(self, obj_data):
