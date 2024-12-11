@@ -142,7 +142,7 @@ service_beneficiary_add_payload = {
     "date_valid_to": "2023-12-31",
 }
 
-service_beneficiary_update_payload = {
+service_beneficiary_update_status_active_payload = {
     "status": "ACTIVE",
     "date_valid_from": "2023-01-01",
     "date_valid_to": "2023-12-31",
