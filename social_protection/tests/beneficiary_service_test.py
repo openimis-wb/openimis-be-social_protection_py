@@ -29,65 +29,106 @@ class BeneficiaryServiceTest(TestCase):
         cls.service = BeneficiaryService(cls.user)
         cls.query_all = Beneficiary.objects.filter(is_deleted=False)
         cls.benefit_plan = create_benefit_plan(cls.user.username, payload_override={
-            'code': 'SGQLTest',
+            'code': 'IMAX1',
             'type': "INDIVIDUAL",
             'max_beneficiaries': 1
+        })
+
+        cls.benefit_plan_no_max = create_benefit_plan(cls.user.username, payload_override={
+            'code': 'INOMAX',
+            'type': "INDIVIDUAL",
+            'max_beneficiaries': None
         })
 
         cls.individual = create_individual(cls.user.username)
         cls.individual2 = create_individual(cls.user.username, payload_override={
             'first_name': "Second"
         })
+        cls.individual3 = create_individual(cls.user.username, payload_override={
+            'first_name': "Third"
+        })
 
-    def _add_beneficiary_return_uuid(self, individual: Individual):
+    def add_beneficiary_return_result(self, individual: Individual, benefit_plan: BenefitPlan = None, status="POTENTIAL"):
+        benefit_plan = benefit_plan or self.benefit_plan
         payload = {
             **service_beneficiary_add_payload,
             "individual_id": individual.id,
-            "benefit_plan_id": self.benefit_plan.id
+            "benefit_plan_id": benefit_plan.id,
+            "status": status
         }
         result = self.service.create(payload)
+        return result
+
+    def add_beneficiary_return_uuid(self, individual: Individual, benefit_plan: BenefitPlan = None, status="POTENTIAL"):
+        result = self.add_beneficiary_return_result(individual, benefit_plan, status)
         self.assertTrue(result.get('success', False), result.get('detail', "No details provided"))
         return result.get('data', {}).get('uuid')
 
-    def test_add_beneficiary(self):
-        uuid = self._add_beneficiary_return_uuid(self.individual)
+    def check_beneficiary_exists(self, uuid, with_status=None):
         query = self.query_all.filter(uuid=uuid)
         self.assertEqual(query.count(), 1)
+        if with_status:
+            self.assertEqual(query.first().status, with_status)
+        
+    def check_active_beneficiaries_count_eq(self, count, benefit_plan, msg=None):
+        active_beneficiaries = self.query_all.filter(benefit_plan_id=benefit_plan.id, status="ACTIVE").distinct()
+        self.assertEqual(active_beneficiaries.count(), count, msg)
+
+    def test_add_beneficiary(self):
+        uuid = self.add_beneficiary_return_uuid(self.individual, self.benefit_plan, status="POTENTIAL")
+        self.check_beneficiary_exists(uuid, with_status="POTENTIAL")
+
+        self.assertEqual(self.benefit_plan.max_beneficiaries, 1)
+
+        uuid = self.add_beneficiary_return_uuid(self.individual2, self.benefit_plan, status="ACTIVE")
+        self.check_beneficiary_exists(uuid, with_status="ACTIVE")
+        self.check_active_beneficiaries_count_eq(1, self.benefit_plan, "One active beneficiary should have been added")
+
+        result = self.add_beneficiary_return_result(self.individual3, self.benefit_plan, status="ACTIVE")
+        self.assertFalse(result.get('success', True), "Benefit plan's 'max active beneficiaries' was not enforced")
+        self.assertEqual(self.query_all.filter(individual__first_name=self.individual3.first_name).count(), 0)
+        self.check_active_beneficiaries_count_eq(1, self.benefit_plan, "Second active beneficiary creation should have been blocked")
+        
+        self.assertEqual(self.benefit_plan_no_max.max_beneficiaries, None)
+
+        for i, individual in enumerate([self.individual, self.individual2]):
+            uuid = self.add_beneficiary_return_uuid(individual, self.benefit_plan_no_max, status="ACTIVE")
+            self.check_beneficiary_exists(uuid, with_status="ACTIVE")
+            self.check_active_beneficiaries_count_eq(i+1, self.benefit_plan_no_max, f"{i+1} beneficiaries should be added and active")
 
     def test_update_beneficiary(self):
-        def create_and_update_to_active(individual):
-            uuid = self._add_beneficiary_return_uuid(individual)
+        def create_and_update_to_active(individual, benefit_plan):
+            uuid = self.add_beneficiary_return_uuid(individual, benefit_plan)
             update_payload = {
                 **service_beneficiary_update_status_active_payload,
                 'id': uuid,
                 'individual_id': individual.id,
-                'benefit_plan_id': self.benefit_plan.id
+                'benefit_plan_id': benefit_plan.id
             }
             return self.service.update(update_payload), uuid
         
-        def check_individual_and_status(uuid, status):
-            query = self.query_all.filter(uuid=uuid)
-            self.assertEqual(query.count(), 1)
-            self.assertEqual(query.first().status, status)
-        
-        def check_active_beneficiaries_at_max(msg):
-            active_beneficiaries = self.query_all.filter(benefit_plan_id=self.benefit_plan.id, status="ACTIVE").distinct()
-            self.assertEqual(active_beneficiaries.count(), self.benefit_plan.max_beneficiaries, msg)
-
         self.assertEqual(self.benefit_plan.max_beneficiaries, 1)
 
-        result, uuid = create_and_update_to_active(self.individual)
+        result, uuid = create_and_update_to_active(self.individual, self.benefit_plan)
         self.assertTrue(result.get('success', False), result.get('detail', "No details provided"))
-        check_individual_and_status(uuid, "ACTIVE")
-        check_active_beneficiaries_at_max("One active beneficiary should have been added")
+        self.check_beneficiary_exists(uuid, with_status="ACTIVE")
+        self.check_active_beneficiaries_count_eq(1, self.benefit_plan, "One active beneficiary should have been added")
 
-        result, uuid = create_and_update_to_active(self.individual2)
+        result, uuid = create_and_update_to_active(self.individual, self.benefit_plan)
         self.assertFalse(result.get('success', True), "Benefit plan's 'max active beneficiaries' was not enforced")
-        check_individual_and_status(uuid, "POTENTIAL")
-        check_active_beneficiaries_at_max("Second active beneficiary update should have been blocked")
+        self.check_beneficiary_exists(uuid, with_status="POTENTIAL")
+        self.check_active_beneficiaries_count_eq(1, self.benefit_plan, "Second active beneficiary update should have been blocked")
+
+        self.assertEqual(self.benefit_plan_no_max.max_beneficiaries, None)
+
+        for i, individual in enumerate([self.individual, self.individual2]):
+            result, uuid = create_and_update_to_active(individual, self.benefit_plan_no_max)
+            self.assertTrue(result.get('success', False), result.get('detail', "No details provided"))
+            self.check_beneficiary_exists(uuid, "ACTIVE")
+            self.check_active_beneficiaries_count_eq(i+1, self.benefit_plan_no_max, f"{i+1} beneficiaries should be added and active")
 
     def test_delete_beneficiary(self):
-        uuid = self._add_beneficiary_return_uuid(self.individual)
+        uuid = self.add_beneficiary_return_uuid(self.individual)
         delete_payload = {'id': uuid}
         result = self.service.delete(delete_payload)
         self.assertTrue(result.get('success', False), result.get('detail', "No details provided"))
