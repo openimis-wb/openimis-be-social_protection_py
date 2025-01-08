@@ -54,7 +54,7 @@ class BasePythonWorkflowExecutor(metaclass=ABCMeta):
         4. If action is data upload then 'ID' unique identifier is required as well.
         """
         df_headers = set(self.df.columns)
-        schema = json.loads(self.schema)
+        schema = json.loads(self.schema) if isinstance(self.schema, str) else self.schema
         schema_properties = set(schema.get('properties', {}).keys())
         required_headers = {'first_name', 'last_name', 'dob', 'id'}
         if is_update:
