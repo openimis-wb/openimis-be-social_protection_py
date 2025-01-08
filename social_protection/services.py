@@ -180,7 +180,7 @@ class BeneficiaryImportService:
             workflow=workflow.name,
             json_ext={"group_aggregation_column": group_aggregation_column}
         )
-        record.save(username=self.user.username)
+        record.save(user=self.user)
 
     def validate_import_beneficiaries(self, upload_id: uuid, individual_sources, benefit_plan: BenefitPlan):
         dataframe = self._load_dataframe(individual_sources)
@@ -235,7 +235,11 @@ class BeneficiaryImportService:
         self._synchronize_beneficiary(benefit_plan, upload_id)
 
     def _validate_possible_beneficiaries(self, dataframe: DataFrame, benefit_plan: BenefitPlan, upload_id: uuid, num_workers=4):
-        schema_dict = benefit_plan.beneficiary_data_schema
+
+        if isinstance(benefit_plan.beneficiary_data_schema, str):
+            schema_dict = json.loads(benefit_plan.beneficiary_data_schema)
+        else:
+            schema_dict = benefit_plan.beneficiary_data_schema
         properties = schema_dict.get("properties", {})
 
         calculation_uuid = SocialProtectionConfig.validation_calculation_uuid
@@ -289,7 +293,10 @@ class BeneficiaryImportService:
 
                 # Uniqueness Check
                 if "uniqueness" in field_properties and field in row:
-                    field_validation['validations'][f'{field}_uniqueness'] = not unique_validations[field].loc[row.name]
+                    field_validation['validations'][f'{field}_uniqueness'] = {
+                        'success': not unique_validations[field].loc[row.name] 
+                    }
+                    
 
             validated_dataframe.append(field_validation)
 
@@ -426,7 +433,7 @@ class BeneficiaryImportService:
                 individual.json_ext.update(synch_status)
             else:
                 individual.json_ext = synch_status
-            individual.save(username=self.user.username)
+            individual.save(user=self.user)
 
     def _synchronize_beneficiary(self, benefit_plan, upload_id):
         unique_uuids = list((
@@ -447,7 +454,7 @@ class BeneficiaryImportService:
                 beneficiary.json_ext.update(synch_status)
             else:
                 beneficiary.json_ext = synch_status
-            beneficiary.save(username=self.user.username)
+            beneficiary.save(user=self.user)
 
 
 class BeneficiaryTaskCreatorService:
@@ -491,7 +498,7 @@ class BeneficiaryTaskCreatorService:
 
         data_upload = upload_record.data_upload
         data_upload.status = IndividualDataSourceUpload.Status.WAITING_FOR_VERIFICATION
-        data_upload.save(username=self.user.username)
+        data_upload.save(user=self.user)
 
     def __calculate_percentage_of_invalid_items(self, upload_id):
         number_of_valid_items = len(fetch_summary_of_valid_items(upload_id))
@@ -505,3 +512,8 @@ class BeneficiaryTaskCreatorService:
 
         percentage_of_invalid_items = round(percentage_of_invalid_items, 2)
         return percentage_of_invalid_items
+
+
+class GroupBeneficiaryImportService(BeneficiaryImportService):
+    pass
+    # TODO: create workflow upload/update groups and use it here
