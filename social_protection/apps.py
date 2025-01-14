@@ -24,7 +24,6 @@ DEFAULT_CONFIG = {
     "gql_check_benefit_plan_update": True,
     "gql_check_beneficiary_crud": True,
     "gql_check_group_beneficiary_crud": True,
-    "unique_class_validation": "DeduplicationValidationStrategy",
     "validation_calculation_uuid": "4362f958-5894-435b-9bda-df6cadf88352",
     "enable_maker_checker_for_beneficiary_upload": True,
     "enable_maker_checker_for_beneficiary_update": True,
@@ -47,6 +46,9 @@ DEFAULT_CONFIG = {
     "group_beneficiary_mask_fields": [
         'json_ext.beneficiary_data_source',
         'json_ext.educated_level'
+    ],
+    "beneficiary_base_fields": [
+        'first_name', 'last_name', 'dob', 'location_name', 'location_code', 'id'
     ],
     "social_protection_masking_enabled": True,
     "enable_python_workflows": True,
@@ -74,7 +76,6 @@ class SocialProtectionConfig(AppConfig):
     gql_check_benefit_plan_update = None
     gql_check_beneficiary_crud = None
     gql_check_group_beneficiary_crud = None
-    unique_class_validation = None
     validation_calculation_uuid = None
     validation_import_valid_items = None
     validation_upload_valid_items = None
@@ -92,6 +93,7 @@ class SocialProtectionConfig(AppConfig):
     enable_maker_checker_logic_enrollment = None
     beneficiary_mask_fields = None
     group_beneficiary_mask_fields = None
+    beneficiary_base_fields = None
     social_protection_masking_enabled = None
 
     def ready(self):
