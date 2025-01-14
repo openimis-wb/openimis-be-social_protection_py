@@ -191,7 +191,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
         if individual_id:
             filters.append(Q(
                 Q(beneficiary__individual__id=individual_id) |
-                Q(groupbeneficiary__group__groupindividual__individual__id=individual_id)
+                Q(groupbeneficiary__group__groupindividuals__individual__id=individual_id)
             ))
 
         group_id = kwargs.get("group_id", None)
@@ -312,7 +312,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
                     Query.object_type,
                     custom_filters,
                     query,
-                    "group__groupindividual__individual",
+                    "group__groupindividuals__individual",
                 )
             return query
 
@@ -337,7 +337,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
                 Query.object_type,
                 eligibility_filters,
                 query,
-                "group__groupindividual__individual",
+                "group__groupindividuals__individual",
             )
             eligible_group_beneficiaries = gql_optimizer.query(query_eligible, info)
             eligible_group_uuids = set(eligible_group_beneficiaries.values_list('uuid', flat=True))

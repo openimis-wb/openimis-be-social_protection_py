@@ -2,6 +2,7 @@
 Functionalities shared between different python workflows.
 
 """
+import json
 import logging
 from abc import ABCMeta, abstractmethod
 from typing import Iterable
@@ -53,10 +54,13 @@ class BasePythonWorkflowExecutor(metaclass=ABCMeta):
         3. 'id' is field automatically added to DataFrame which is used for upload.
         4. If action is data upload then 'ID' unique identifier is required as well.
         """
+        
         df_headers = set(self.df.columns)
-        schema_properties = set(self.schema.get('properties', {}).keys())
+        schema = json.loads(self.schema) if isinstance(self.schema, str) else self.schema
+        schema_properties = set(schema.get('properties', {}).keys())
         schema_properties.update(['recipient_info', 'group_code', 'individual_role'])
         required_headers = set(SocialProtectionConfig.beneficiary_base_fields)
+        
         if is_update:
             required_headers.add('ID')
 
