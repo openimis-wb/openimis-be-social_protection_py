@@ -10,7 +10,6 @@ from django.test.utils import CaptureQueriesContext, override_settings
 from core.models.openimis_graphql_test_case import BaseTestContext
 from individual.models import IndividualDataSourceUpload
 from social_protection import schema as sp_schema
-from social_protection.apps import SocialProtectionConfig
 from social_protection.models import (
     BenefitPlan, BenefitPlanDataUploadRecords, Programme, UserProgramme,
 )
@@ -224,6 +223,52 @@ class ProgrammeGQLTest(PatchedOpenIMISGraphQLTestCase):
             )
             export.assert_called_once()
 
+    @override_settings(ROW_SECURITY=False)
+    def test_group_beneficiary_export_is_scoped(self):
+        captured = {}
+
+        def _capture(queryset, *args, **kwargs):
+            captured["codes"] = set(queryset.values_list("benefit_plan__code", flat=True))
+            return SimpleNamespace(name="export")
+
+        request = RequestFactory().get("/")
+        request.user = self.member_a
+        with mock.patch.object(sp_schema.gql_optimizer, "query", side_effect=lambda qs, info: qs), \
+                mock.patch("social_protection.export_mixin.ExportableQueryModel.create_csv_export",
+                           side_effect=_capture):
+            sp_schema.Query.resolve_group_beneficiary_export(
+                None, SimpleNamespace(context=request),
+                fields=["id", "group.id", "json_ext"], fields_columns=json.dumps({"id": "ID"}),
+            )
+        self.assertIn("PGGA", captured["codes"])
+        self.assertNotIn("PGGB", captured["codes"])
+
+    @override_settings(ROW_SECURITY=False)
+    def test_export_refuses_paths_into_user_models_and_accepts_frontend_paths(self):
+        request = RequestFactory().get("/")
+        request.user = self.member_a
+        info = SimpleNamespace(context=request)
+        with mock.patch.object(sp_schema.gql_optimizer, "query", side_effect=lambda qs, info: qs), \
+                mock.patch("social_protection.export_mixin.ExportableQueryModel.create_csv_export") as export:
+            export.return_value = SimpleNamespace(name="export")
+            for fields in (["userCreated.iUser.password"], ["userCreated.iUser.privateKey"],
+                           ["individual.userCreated.username"], ["benefitPlan.userUpdated.iUser.email"],
+                           ["userCreated.username"]):
+                with self.subTest(fields=fields):
+                    with self.assertRaisesMessage(ValueError, "social_protection.export.field_not_allowed"):
+                        sp_schema.Query.resolve_beneficiary_export(
+                            None, info, fields=fields, fields_columns=json.dumps({}))
+            export.assert_not_called()
+            sp_schema.Query.resolve_beneficiary_export(
+                None, info,
+                fields=["id", "individual.first_name", "individual.last_name", "individual.dob", "json_ext",
+                        "jsonExt.educated_level", "individual.location.parent.name"],
+                fields_columns=json.dumps({}),
+            )
+            sp_schema.Query.resolve_group_beneficiary_export(
+                None, info, fields=["id", "group.id", "json_ext"], fields_columns=json.dumps({}))
+            self.assertEqual(export.call_count, 2)
+
     def test_upload_history_is_scoped(self):
         codes = self._codes(
             self._query("{ beneficiaryDataUploadHistory { edges { node { benefitPlan { code } } } } }",
@@ -323,41 +368,58 @@ class ProgrammeGQLTest(PatchedOpenIMISGraphQLTestCase):
             "updateBenefitPlan", self._benefit_plan_input("PGPB", plan_id=self.plan_b.id), self.member_a_token)
         self.assert_mutation_error(internal_id, self.member_a_token, OUT_OF_SCOPE_MESSAGE)
 
-    def test_moving_an_existing_benefit_plan_requires_a_superuser(self):
-        internal_id = self._mutate(
-            "updateBenefitPlan",
-            self._benefit_plan_input("PGPA", self.programme_b.id, self.plan_a.id),
-            self.member_a_token,
-        )
-        self.assert_mutation_error(
-            internal_id, self.member_a_token, "social_protection.programme.change_requires_superuser")
-        internal_id = self._mutate(
-            "updateBenefitPlan",
-            self._benefit_plan_input("PGPA", plan_id=self.plan_a.id) + ", detachProgramme: true",
-            self.member_a_token,
-        )
-        self.assert_mutation_error(
-            internal_id, self.member_a_token, "social_protection.programme.change_requires_superuser")
+    def test_update_benefit_plan_input_has_no_programme_fields(self):
+        for extra in (f', programmeId: "{self.programme_b.id}"', ", detachProgramme: true"):
+            with self.subTest(extra=extra):
+                response = self._query(
+                    "mutation { updateBenefitPlan(input: { %s }) { internalId } }"
+                    % (self._benefit_plan_input("PGPA", plan_id=self.plan_a.id) + extra),
+                    self.admin_token,
+                )
+                self.assertIn("errors", json.loads(response.content))
 
-    def test_superuser_detaches_a_benefit_plan_without_sending_null(self):
-        with mock.patch.object(SocialProtectionConfig, "gql_check_benefit_plan_update", False):
-            internal_id = self._mutate(
-                "updateBenefitPlan",
-                self._benefit_plan_input("PGPA", plan_id=self.plan_a.id) + ", detachProgramme: true",
-                self.admin_token,
-            )
+    def test_update_with_maker_checker_leaves_the_programme_alone(self):
+        from tasks_management.models import Task
+        internal_id = self._mutate(
+            "updateBenefitPlan", self._benefit_plan_input("PGPA", plan_id=self.plan_a.id), self.admin_token)
+        self.assert_mutation_success(internal_id, self.admin_token)
+        task = Task.objects.filter(entity_id=str(self.plan_a.id)).order_by("-date_created").first()
+        self.assertIsNotNone(task)
+        self.assertNotIn("programme_id", json.dumps(task.data))
+        self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_a.id)
+
+    def _set_programme(self, plan, programme_id, token):
+        body = f'id: "{plan.id}"' + (f', programmeId: "{programme_id}"' if programme_id else "")
+        return self._mutate("setBenefitPlanProgramme", body, token)
+
+    def test_superuser_sets_the_programme_of_an_existing_plan_immediately(self):
+        internal_id = self._set_programme(self.plan_a, self.programme_b.id, self.admin_token)
+        self.assert_mutation_success(internal_id, self.admin_token)
+        self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_b.id)
+
+        internal_id = self._set_programme(self.plan_a, self.programme_b.id, self.admin_token)
+        self.assert_mutation_success(internal_id, self.admin_token)
+        self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_b.id)
+
+        internal_id = self._set_programme(self.plan_a, None, self.admin_token)
         self.assert_mutation_success(internal_id, self.admin_token)
         self.assertIsNone(BenefitPlan.objects.get(id=self.plan_a.id).programme_id)
 
-    def test_detach_together_with_a_programme_id_is_refused(self):
-        with mock.patch.object(SocialProtectionConfig, "gql_check_benefit_plan_update", False):
-            internal_id = self._mutate(
-                "updateBenefitPlan",
-                self._benefit_plan_input("PGPA", self.programme_b.id, self.plan_a.id) + ", detachProgramme: true",
-                self.admin_token,
-            )
-        self.assert_mutation_error(internal_id, self.admin_token, "social_protection.programme.detach_with_programme")
-        self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_a.id)
+    def test_setting_an_unknown_or_deleted_programme_is_refused(self):
+        for target in (uuid.uuid4(), self.programme_deleted.id):
+            with self.subTest(target=target):
+                internal_id = self._set_programme(self.plan_a, target, self.admin_token)
+                self.assert_mutation_error(internal_id, self.admin_token, PROGRAMME_NOT_FOUND_MESSAGE)
+                self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_a.id)
+
+    def test_setting_the_programme_is_refused_to_non_superusers(self):
+        for plan, target in ((self.plan_a, self.programme_empty.id), (self.plan_a, None),
+                             (self.plan_none, self.programme_a.id)):
+            with self.subTest(plan=plan.code, target=target):
+                internal_id = self._set_programme(plan, target, self.member_a_token)
+                self.assert_mutation_error(
+                    internal_id, self.member_a_token, "social_protection.programme.change_requires_superuser")
+                self.assertEqual(BenefitPlan.objects.get(id=plan.id).programme_id, plan.programme_id)
 
     def test_bulk_delete_rolls_back_earlier_ids_when_a_later_id_is_refused(self):
         internal_id = self._mutate(

@@ -41,6 +41,7 @@ from social_protection.signals.on_validation_import_valid_items import (
     _complete_task_for_accepted,
     _resolve_task_any,
     on_task_complete_action,
+    on_task_resolve,
 )
 from social_protection.tests.programme_helpers import (
     add_member,
@@ -60,6 +61,7 @@ from social_protection.workflows.utils import BasePythonWorkflowExecutor
 
 CHANGE_REQUIRES_SUPERUSER = "social_protection.programme.change_requires_superuser"
 UPLOAD_NOT_IN_PLAN = "social_protection.validation.upload_not_in_benefit_plan"
+SET_PROGRAMME_REQUIRED = "social_protection.programme.change_through_set_benefit_plan_programme"
 
 
 class ProgrammeWriteScopeTest(TestCase):
@@ -167,26 +169,29 @@ class ProgrammeWriteScopeTest(TestCase):
         self.assertTrue(result["success"], result)
         self.assertEqual(BenefitPlan.objects.get(code="PWOWN").programme_id, self.programme_a.id)
 
-    def test_changing_the_programme_of_an_existing_plan_requires_a_superuser(self):
-        service = BenefitPlanService(self.member)
-        for plan, target in (
-            (self.plan_a, self.programme_c.id),
-            (self.plan_a, None),
-            (self.plan_none, self.programme_a.id),
-            (self.plan_none, self.programme_b.id),
-        ):
-            with self.subTest(plan=plan.code, target=target):
-                self.assertRefused(
-                    service.update(self._plan_payload(plan, programme_id=target)), CHANGE_REQUIRES_SUPERUSER)
-                self.assertEqual(BenefitPlan.objects.get(id=plan.id).programme_id, plan.programme_id)
+    def test_update_refuses_any_programme_change(self):
+        for user in (self.member, self.admin):
+            for plan, target in ((self.plan_a, self.programme_c.id), (self.plan_a, None),
+                                 (self.plan_none, self.programme_a.id)):
+                with self.subTest(user=user.username, plan=plan.code, target=target):
+                    self.assertRefused(
+                        BenefitPlanService(user).update(self._plan_payload(plan, programme_id=target)),
+                        SET_PROGRAMME_REQUIRED)
+                    self.assertEqual(BenefitPlan.objects.get(id=plan.id).programme_id, plan.programme_id)
 
-    def test_superuser_attaches_moves_and_detaches_an_existing_plan(self):
+    def test_superuser_sets_moves_and_clears_the_programme_through_the_service(self):
         service = BenefitPlanService(self.admin)
         for target in (self.programme_a.id, self.programme_b.id, None):
             with self.subTest(target=target):
-                result = service.update(self._plan_payload(self.plan_none, programme_id=target))
+                result = service.set_programme({"id": self.plan_none.id, "programme_id": target})
                 self.assertTrue(result["success"], result)
                 self.assertEqual(BenefitPlan.objects.get(id=self.plan_none.id).programme_id, target)
+
+    def test_set_programme_is_refused_to_non_superusers(self):
+        result = BenefitPlanService(self.member).set_programme(
+            {"id": self.plan_a.id, "programme_id": self.programme_c.id})
+        self.assertRefused(result, CHANGE_REQUIRES_SUPERUSER)
+        self.assertEqual(BenefitPlan.objects.get(id=self.plan_a.id).programme_id, self.programme_a.id)
 
     def test_keeping_the_same_programme_on_update_is_allowed(self):
         result = BenefitPlanService(self.member).update(
@@ -373,6 +378,81 @@ class ProgrammeWriteScopeTest(TestCase):
         }})
         self.assertEqual(
             BenefitPlan.objects.get(id=self.plan_b.id).date_valid_to, self.plan_b.date_valid_to)
+
+    def test_rejected_ids_of_another_upload_are_left_untouched(self):
+        other_upload = IndividualDataSourceUpload(source_name="other upload", source_type="beneficiary import")
+        other_upload.save(username=self.admin.username)
+        foreign_source = IndividualDataSource(upload=other_upload, json_ext={"first_name": "y"}, validations={})
+        foreign_source.save(username=self.admin.username)
+        own_source = IndividualDataSource(upload=self.upload_b, json_ext={"first_name": "z"}, validations={})
+        own_source.save(username=self.admin.username)
+        task = mock.Mock(
+            entity_id=self.upload_record_b.id, source="import_valid_items", business_event="any",
+            business_status={str(self.admin.id): {
+                "REJECT": [str(foreign_source.id), str(own_source.id)], "ACCEPT": [],
+            }},
+        )
+        task.history.first.return_value.prev_record = None
+        _resolve_task_any(task, self.admin)
+        self.assertFalse(IndividualDataSource.objects.get(id=foreign_source.id).is_deleted)
+        self.assertTrue(IndividualDataSource.objects.get(id=own_source.id).is_deleted)
+
+    def _task_payload(self, task_id, business_event, entity_id, status):
+        return {"success": True, "data": {
+            "task": {"id": task_id, "business_event": business_event, "status": status,
+                     "entity_id": str(entity_id), "executor_action_event": "APPROVED"},
+            "user": {"id": str(self.member.id)},
+        }}
+
+    def _assert_logged(self, logs, task_id):
+        self.assertTrue(
+            any(task_id in line and OUT_OF_SCOPE_MESSAGE in line for line in logs.output), logs.output)
+
+    def test_refused_import_task_completion_is_logged_with_the_task_id(self):
+        from social_protection.apps import SocialProtectionConfig
+        from tasks_management.models import Task
+        task_id = str(uuid.uuid4())
+        with self.assertLogs("social_protection.signals.on_validation_import_valid_items", level="ERROR") as logs:
+            on_task_complete_action(
+                SocialProtectionConfig.validation_import_valid_items,
+                result=self._task_payload(task_id, SocialProtectionConfig.validation_import_valid_items,
+                                          self.upload_record_b.id, Task.Status.COMPLETED),
+            )
+        self._assert_logged(logs, task_id)
+
+    def test_refused_partial_resolution_is_logged_with_the_task_id(self):
+        from social_protection.apps import SocialProtectionConfig
+        from tasks_management.apps import TasksManagementConfig
+        from tasks_management.models import Task
+        task_id = str(uuid.uuid4())
+        task = mock.Mock(
+            id=task_id, entity_id=self.upload_record_b.id, source="import_valid_items", business_event="any",
+            business_status={}, task_group=mock.Mock(completion_policy="ANY"),
+        )
+        payload = self._task_payload(task_id, SocialProtectionConfig.validation_import_valid_items,
+                                     self.upload_record_b.id, Task.Status.ACCEPTED)
+        payload["data"]["task"]["executor_action_event"] = TasksManagementConfig.default_executor_event
+        manager = mock.Mock()
+        manager.select_related.return_value.prefetch_related.return_value.get.return_value = task
+        with mock.patch.object(Task, "objects", manager), \
+                self.assertLogs("social_protection.signals.on_validation_import_valid_items", level="ERROR") as logs:
+            on_task_resolve(result=payload)
+        self._assert_logged(logs, task_id)
+
+    def test_refused_close_task_is_logged_with_the_task_id(self):
+        from social_protection.apps import SocialProtectionConfig
+        from social_protection.signals import bind_service_signals
+        from tasks_management.models import Task
+        handlers = []
+        with mock.patch("social_protection.signals.bind_service_signal",
+                        side_effect=lambda name, handler, bind_type: handlers.append(handler)):
+            bind_service_signals()
+        close_handler = next(h for h in handlers if getattr(h, "__name__", "") == "on_task_close_benefit_plan")
+        task_id = str(uuid.uuid4())
+        with self.assertLogs("social_protection.signals", level="ERROR") as logs:
+            close_handler(result=self._task_payload(
+                task_id, SocialProtectionConfig.benefit_plan_suspend, self.plan_b.id, Task.Status.COMPLETED))
+        self._assert_logged(logs, task_id)
 
     def test_python_workflow_refuses_an_out_of_scope_user(self):
         class _Executor(BasePythonWorkflowExecutor):

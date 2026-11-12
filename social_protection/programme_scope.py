@@ -240,14 +240,15 @@ def scope_programmes(queryset, user, request=None):
 
 def scope_memberships(queryset, user, request=None, include_co_members=False):
     """
-    Superusers see every membership; other users their own and, with
-    `include_co_members`, the live memberships of their programmes.
+    Superusers see every membership; other users their own live memberships of
+    live programmes and, with `include_co_members`, the live memberships of
+    their programmes.
     """
     if is_superuser(user):
         return queryset
     if not _is_authenticated(user):
         return queryset.none()
-    q = Q(user_id=user.id)
+    q = Q(user_id=user.id, is_deleted=False, programme__is_deleted=False)
     if include_co_members:
         q |= Q(programme_id__in=member_programme_ids(user, request), is_deleted=False)
     return queryset.filter(q)
@@ -356,15 +357,12 @@ def assert_can_create_in_programme(user, programme_id):
         raise ProgrammeScopeError(NOT_A_MEMBER_MESSAGE)
 
 
-def assert_can_change_programme(user, target_programme_id, current_programme_id):
+def assert_can_change_programme(user, target_programme_id):
     """
     Attaching, moving or detaching an existing benefit plan is reserved to
-    superusers; keeping its current programme is not a change.
+    superusers; a target programme must be live.
     """
     target_programme_id = _as_uuid(target_programme_id)
-    current_programme_id = _as_uuid(current_programme_id)
-    if target_programme_id == current_programme_id:
-        return
     if not is_superuser(user):
         raise ProgrammeScopeError(CHANGE_REQUIRES_SUPERUSER_MESSAGE)
     if target_programme_id is not None:

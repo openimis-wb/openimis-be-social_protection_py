@@ -11,6 +11,14 @@ from django.db.models import JSONField, QuerySet
 from graphene_django.registry import get_global_registry
 
 EXPORT_FIELD_NOT_ALLOWED_MESSAGE = "social_protection.export.field_not_allowed"
+# Models an export path may enter through a forward relation; user models are never among them.
+EXPORTABLE_RELATED_MODELS = frozenset({
+    "individual.individual",
+    "individual.group",
+    "location.location",
+    "social_protection.benefitplan",
+    "social_protection.programme",
+})
 
 logger = logging.getLogger(__file__)
 
@@ -87,9 +95,9 @@ class ExportableSocialProtectionQueryMixin(ExportableQueryMixin):
     @staticmethod
     def _assert_exportable_path(model, path):
         """
-        Exported paths follow local fields and forward relations only; a single
-        unknown name is left to the queryset (annotation), and the segments after
-        a JSON field are keys inside it.
+        Exported paths follow local fields and forward relations into
+        EXPORTABLE_RELATED_MODELS only; a single unknown name is left to the
+        queryset (annotation), and the segments after a JSON field are keys inside it.
         """
         segments = path.split("__")
         current = model
@@ -103,6 +111,8 @@ class ExportableSocialProtectionQueryMixin(ExportableQueryMixin):
             if not field.concrete or field.many_to_many:
                 raise ValueError(f"{EXPORT_FIELD_NOT_ALLOWED_MESSAGE}: {path}")
             if field.is_relation:
+                if field.related_model._meta.label_lower not in EXPORTABLE_RELATED_MODELS:
+                    raise ValueError(f"{EXPORT_FIELD_NOT_ALLOWED_MESSAGE}: {path}")
                 current = field.related_model
                 continue
             if isinstance(field, JSONField) or index == len(segments) - 1:

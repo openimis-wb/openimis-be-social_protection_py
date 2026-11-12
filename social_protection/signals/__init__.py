@@ -49,7 +49,8 @@ def bind_service_signals():
                                 group_beneficiary.status = BeneficiaryStatus.GRADUATED
                                 group_beneficiary.save(username=user.username)
         except Exception as exc:
-            logger.error("Error while executing on_task_close_benefit_plan", exc_info=exc)
+            task_id = (((kwargs.get('result') or {}).get('data') or {}).get('task') or {}).get('id')
+            logger.error("Task %s did not close the benefit plan: %s", task_id, exc, exc_info=exc)
 
     bind_service_signal(
         'task_service.complete_task',

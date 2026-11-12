@@ -15,6 +15,9 @@ from social_protection.programme_scope import (
 )
 
 
+SET_PROGRAMME_REQUIRED_MESSAGE = "social_protection.programme.change_through_set_benefit_plan_programme"
+
+
 def assert_row_in_write_scope(user, model, row_id, target_benefit_plan=None):
     """
     The current benefit plan of the `model` row `row_id` and, when given, the
@@ -50,8 +53,15 @@ class BenefitPlanValidation(BaseModelValidation, ObjectExistsValidationMixin):
         assert_benefit_plan_in_scope(user, uuid)
         if 'programme_id' in data:
             current = BenefitPlan.objects.filter(id=uuid).values_list('programme_id', flat=True).first()
-            assert_can_change_programme(user, data['programme_id'], current)
+            if str(current) != str(data['programme_id']):
+                raise ValidationError(SET_PROGRAMME_REQUIRED_MESSAGE)
         super().validate_update(user, **data)
+
+    @classmethod
+    def validate_set_programme(cls, user, **data):
+        uuid = data.get('id')
+        assert_can_change_programme(user, data.get('programme_id'))
+        cls.validate_object_exists(uuid)
 
     @classmethod
     def validate_delete(cls, user, **data):

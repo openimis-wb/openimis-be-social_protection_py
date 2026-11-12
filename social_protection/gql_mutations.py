@@ -48,7 +48,6 @@ class CreateBenefitPlanInputType(OpenIMISMutation.Input):
     date_valid_to = graphene.Date(required=True)
     json_ext = graphene.types.json.JSONString(required=False)
     description = graphene.String(required=False, max_length=1024)
-    programme_id = graphene.UUID(required=False)
 
     def resolve_type(self, info):
         return self.type
@@ -56,10 +55,6 @@ class CreateBenefitPlanInputType(OpenIMISMutation.Input):
 
 class UpdateBenefitPlanInputType(CreateBenefitPlanInputType):
     id = graphene.UUID(required=True)
-    detach_programme = graphene.Boolean(
-        required=False,
-        description="True removes the benefit plan from its programme; cannot be combined with programmeId",
-    )
 
 
 class CreateGenericBeneficiaryInputType(OpenIMISMutation.Input):
@@ -141,7 +136,7 @@ class CreateBenefitPlanMutation(
         return None
 
     class Input(CreateBenefitPlanInputType):
-        pass
+        programme_id = graphene.UUID(required=False)
 
 
 class UpdateBenefitPlanMutation(
@@ -165,8 +160,6 @@ class UpdateBenefitPlanMutation(
             user, SocialProtectionConfig.gql_schema_update_perms,
             data, 'json_ext'
         )
-        if data.get('detach_programme') and data.get('programme_id') is not None:
-            raise ValidationError("social_protection.programme.detach_with_programme")
 
     @classmethod
     def _mutate(cls, user, **data):
@@ -176,8 +169,6 @@ class UpdateBenefitPlanMutation(
             data.pop('client_mutation_id')
         if "client_mutation_label" in data:
             data.pop('client_mutation_label')
-        if data.pop('detach_programme', False):
-            data['programme_id'] = None
 
         service = BenefitPlanService(user)
         if SocialProtectionConfig.gql_check_benefit_plan_update:
@@ -191,6 +182,33 @@ class UpdateBenefitPlanMutation(
 
     class Input(UpdateBenefitPlanInputType):
         pass
+
+
+class SetBenefitPlanProgrammeMutation(BaseMutation):
+    """
+    Attaches an existing benefit plan to a programme, moves it, or detaches it
+    when `programme_id` is omitted. Superusers only; applied without a task.
+    """
+    _mutation_class = "SetBenefitPlanProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = BenefitPlan
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        if type(user) is AnonymousUser or not user.id:
+            raise ValidationError("mutation.authentication_required")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = BenefitPlanService(user).set_programme({
+            'id': data.get('id'),
+            'programme_id': data.get('programme_id'),
+        })
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True)
+        programme_id = graphene.UUID(required=False)
 
 
 class DeleteBenefitPlanMutation(

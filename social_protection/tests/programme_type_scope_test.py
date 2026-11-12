@@ -93,6 +93,39 @@ class ProgrammeTypeScopeTest(PatchedOpenIMISGraphQLTestCase):
             enrollment=cls.group_enrollment_b, day_number=1, percent_complete=10)
         cls.group_time_entry_b.save(username=username)
 
+        cls.enrollment_a = BeneficiaryProjectEnrollment(beneficiary_id=cls.beneficiary_a, project=cls.project_a)
+        cls.enrollment_a.save(username=username)
+        cls.time_entry_a = BeneficiaryProjectTimeEntry(enrollment=cls.enrollment_a, day_number=1, percent_complete=20)
+        cls.time_entry_a.save(username=username)
+        cls.foreign_enrollment_of_a = BeneficiaryProjectEnrollment(
+            beneficiary_id=cls.beneficiary_a, project=cls.project_b)
+        cls.foreign_enrollment_of_a.save(username=username)
+        BeneficiaryProjectTimeEntry(
+            enrollment=cls.foreign_enrollment_of_a, day_number=1, percent_complete=30).save(username=username)
+        cls.group_project_a = Project(
+            name="PT group project A", benefit_plan=cls.group_plan_a, activity=cls.project_a.activity,
+            location=cls.project_a.location, target_beneficiaries=10, working_days=10,
+        )
+        cls.group_project_a.save(username=username)
+        cls.group_enrollment_a = GroupBeneficiaryProjectEnrollment(
+            group_beneficiary_id=cls.group_beneficiary_a, project=cls.group_project_a)
+        cls.group_enrollment_a.save(username=username)
+        GroupBeneficiaryProjectTimeEntry(
+            enrollment=cls.group_enrollment_a, day_number=1, percent_complete=40).save(username=username)
+        GroupBeneficiaryProjectEnrollment(
+            group_beneficiary_id=cls.group_beneficiary_a, project=cls.group_project_b).save(username=username)
+
+        cls.moved_project = Project(
+            name="PT moved project", benefit_plan=cls.plan_b, activity=cls.project_a.activity,
+            location=cls.project_a.location, target_beneficiaries=10, working_days=10,
+        )
+        cls.moved_project.save(username=username)
+        cls.moved_project.benefit_plan = cls.plan_a
+        cls.moved_project.save(username=username)
+        cls.moved_plan = create_programme_benefit_plan("PTMV", cls.programme_b, username)
+        cls.moved_plan.programme = cls.programme_a
+        cls.moved_plan.save(username=username)
+
         upload = IndividualDataSourceUpload(source_name="upload PTPB", source_type="beneficiary import")
         upload.save(username=username)
         cls.upload_record_b = BenefitPlanDataUploadRecords(data_upload=upload, benefit_plan=cls.plan_b, workflow="t")
@@ -202,6 +235,56 @@ class ProgrammeTypeScopeTest(PatchedOpenIMISGraphQLTestCase):
 
     def test_project_enrollments_pivot_is_scoped(self):
         query = """{ project(name: "PT project A") { edges { node {
-            beneficiaryEnrollments { edges { node { id } } } } } } }"""
+            beneficiaryEnrollments { edges { node { id beneficiary { benefitPlan { code } } } } } } } } }"""
         node = self._data(query, self.member_token)["project"]["edges"][0]["node"]
-        self.assertEqual(node["beneficiaryEnrollments"]["edges"], [])
+        enrollments = {
+            e["node"]["id"]: e["node"]["beneficiary"]["benefitPlan"]["code"]
+            for e in node["beneficiaryEnrollments"]["edges"]
+        }
+        self.assertIn(to_global_id("BeneficiaryProjectEnrollmentGQLType", str(self.enrollment_a.id)), enrollments)
+        self.assertNotIn(
+            to_global_id("BeneficiaryProjectEnrollmentGQLType", str(self.cross_enrollment.id)), enrollments)
+        self.assertEqual(set(enrollments.values()), {"PTPA"})
+
+    def test_beneficiary_project_enrollments_and_time_entries_are_scoped(self):
+        query = """{ beneficiary(benefitPlan_Code: "PTPA") { edges { node {
+            projectEnrollments { project { name benefitPlan { code } } timeEntries { percentComplete } } } } } }"""
+        node = self._data(query, self.member_token)["beneficiary"]["edges"][0]["node"]
+        projects = {e["project"]["name"] for e in node["projectEnrollments"]}
+        self.assertIn("PT project A", projects)
+        self.assertNotIn("PT project B", projects)
+        entries = {t["percentComplete"] for e in node["projectEnrollments"] for t in e["timeEntries"]}
+        self.assertEqual(entries, {20})
+
+    def test_group_beneficiary_project_enrollments_and_time_entries_are_scoped(self):
+        query = """{ groupBeneficiary(benefitPlan_Code: "PTGA") { edges { node {
+            projectEnrollments { project { name } timeEntries { percentComplete } } } } } }"""
+        node = self._data(query, self.member_token)["groupBeneficiary"]["edges"][0]["node"]
+        projects = {e["project"]["name"] for e in node["projectEnrollments"]}
+        self.assertIn("PT group project A", projects)
+        self.assertNotIn("PT group project B", projects)
+        entries = {t["percentComplete"] for e in node["projectEnrollments"] for t in e["timeEntries"]}
+        self.assertEqual(entries, {40})
+
+    def test_history_of_a_moved_project_hides_its_former_benefit_plan(self):
+        query = '{ projectHistory(id: "%s") { edges { node { benefitPlan { code } } } } }' % self.moved_project.id
+        rows = self._data(query, self.member_token)["projectHistory"]["edges"]
+        plans = [row["node"]["benefitPlan"] for row in rows]
+        self.assertEqual(len(plans), 2)
+        self.assertIn({"code": "PTPA"}, plans)
+        self.assertIn(None, plans)
+
+    def test_history_of_a_moved_plan_hides_its_former_programme(self):
+        query = '{ benefitPlanHistory(id: "%s") { edges { node { programme { code } } } } }' % self.moved_plan.id
+        rows = self._data(query, self.member_token)["benefitPlanHistory"]["edges"]
+        programmes = [row["node"]["programme"] for row in rows]
+        self.assertIn({"code": "PTA"}, programmes)
+        self.assertIn(None, programmes)
+        self.assertNotIn({"code": "PTB"}, programmes)
+
+    def test_eligible_for_project_filter_treats_a_foreign_project_as_unknown(self):
+        query = '{ beneficiary(eligibleForProject: "%s") { totalCount } }'
+        own = self.query(query % self.project_a.id, headers={"HTTP_AUTHORIZATION": f"Bearer {self.member_token}"})
+        self.assertResponseNoErrors(own)
+        foreign = self.query(query % self.project_b.id, headers={"HTTP_AUTHORIZATION": f"Bearer {self.member_token}"})
+        self.assertIn("errors", json.loads(foreign.content))

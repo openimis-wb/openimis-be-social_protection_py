@@ -81,6 +81,24 @@ class BenefitPlanService(BaseService, UpdateCheckerLogicServiceMixin):
         obj_data = {k: v for k, v in obj_data.items() if k != 'user'}
         return super().delete(obj_data)
 
+    @register_service_signal('benefit_plan_service.set_programme')
+    def set_programme(self, obj_data):
+        try:
+            with transaction.atomic():
+                self.validation_class.validate_set_programme(self.user, **obj_data)
+                benefit_plan = BenefitPlan.objects.get(id=obj_data['id'])
+                programme_id = obj_data.get('programme_id')
+                if str(benefit_plan.programme_id) != str(programme_id):
+                    benefit_plan.programme_id = programme_id
+                    benefit_plan.save(user=self.user)
+                return output_result_success({'id': str(benefit_plan.id), 'programme_id': str(programme_id)})
+        except Exception as exc:
+            return output_exception(
+                model_name=self.OBJECT_TYPE.__name__,
+                method="set_programme",
+                exception=exc
+            )
+
     @register_service_signal('benefit_plan_service.undo_delete')
     def undo_delete(self, obj_data):
         self.validation_class.validate_undo_delete(obj_data)

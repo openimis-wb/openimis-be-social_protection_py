@@ -248,7 +248,10 @@ class BeneficiarySharedFilterMixin:
         if not value:
             return queryset
 
-        project = Project.objects.get(id=value)
+        request = getattr(self, 'request', None)
+        project = scope_queryset(
+            Project.objects.filter(id=value), getattr(request, 'user', None), request
+        ).get()
         enrollment_model = self._get_enrollment_model()
         beneficiary_field = self._get_beneficiary_field()
 
@@ -366,8 +369,8 @@ class BeneficiaryProjectEnrollmentGQLType(BenefitPlanScopedTypeMixin, DjangoObje
         connection_class = ExtendedConnection
 
     def resolve_time_entries(self, info, **kwargs):
-        qs = BeneficiaryProjectTimeEntry.objects.filter(
-            enrollment=self, is_deleted=False)
+        qs = BeneficiaryProjectTimeEntryGQLType.get_queryset(
+            BeneficiaryProjectTimeEntry.objects.filter(enrollment=self, is_deleted=False), info)
         return gql_optimizer.query(qs, info)
 
 
@@ -386,8 +389,8 @@ class BeneficiaryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMi
         return self.is_eligible
 
     def resolve_project_enrollments(self, info, **kwargs):
-        qs = BeneficiaryProjectEnrollment.objects.filter(
-            beneficiary=self, is_deleted=False)
+        qs = BeneficiaryProjectEnrollmentGQLType.get_queryset(
+            BeneficiaryProjectEnrollment.objects.filter(beneficiary=self, is_deleted=False), info)
         return gql_optimizer.query(qs, info)
 
 
@@ -472,8 +475,8 @@ class GroupBeneficiaryProjectEnrollmentGQLType(BenefitPlanScopedTypeMixin, Djang
         connection_class = ExtendedConnection
 
     def resolve_time_entries(self, info, **kwargs):
-        qs = GroupBeneficiaryProjectTimeEntry.objects.filter(
-            enrollment=self, is_deleted=False)
+        qs = GroupBeneficiaryProjectTimeEntryGQLType.get_queryset(
+            GroupBeneficiaryProjectTimeEntry.objects.filter(enrollment=self, is_deleted=False), info)
         return gql_optimizer.query(qs, info)
 
 
@@ -493,8 +496,8 @@ class GroupBeneficiaryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, Json
         return self.is_eligible
 
     def resolve_project_enrollments(self, info, **kwargs):
-        qs = GroupBeneficiaryProjectEnrollment.objects.filter(
-            group_beneficiary=self, is_deleted=False)
+        qs = GroupBeneficiaryProjectEnrollmentGQLType.get_queryset(
+            GroupBeneficiaryProjectEnrollment.objects.filter(group_beneficiary=self, is_deleted=False), info)
         return gql_optimizer.query(qs, info)
 
 
@@ -540,9 +543,17 @@ class BenefitPlanHistoryGQLType(DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
     has_payment_plans = graphene.Boolean()
 
+    programme = graphene.Field(ProgrammeGQLType)
+
     @classmethod
     def get_queryset(cls, queryset, info):
         return scope_by_current_rows(queryset, BenefitPlan, info.context.user, info.context, benefit_plan_path="")
+
+    def resolve_programme(self, info):
+        """The programme recorded on this history row, when the user may see it."""
+        if self.programme_id is None:
+            return None
+        return ProgrammeGQLType.get_queryset(Programme.objects.filter(id=self.programme_id), info).first()
 
     def resolve_user_updated(self, info):
         return self.user_updated
@@ -638,9 +649,15 @@ class ProjectGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin)
 class ProjectHistoryGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
 
+    benefit_plan = graphene.Field(BenefitPlanGQLType)
+
     @classmethod
     def get_queryset(cls, queryset, info):
         return scope_by_current_rows(queryset, Project, info.context.user, info.context)
+
+    def resolve_benefit_plan(self, info):
+        """The benefit plan recorded on this history row, when it is in the user's scope."""
+        return BenefitPlanGQLType.get_queryset(BenefitPlan.objects.filter(id=self.benefit_plan_id), info).first()
 
     def resolve_user_updated(self, info):
         return self.user_updated

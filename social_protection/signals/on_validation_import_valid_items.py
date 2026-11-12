@@ -405,7 +405,9 @@ def on_task_complete_action(business_event, **kwargs):
             data_upload.error = {"Task Resolve": str(exc)}
             # Todo: this should be changed to system user
             data_upload.save(username=data_upload.user_updated.username)
-        logger.error(f"Error while executing on_task_complete_action for {business_event}", exc_info=exc)
+        logger.error(
+            "Task %s (%s) was not applied: %s", task.get('id'), business_event, exc, exc_info=exc
+        )
 
 
 def on_task_complete_import_validated(**kwargs):
@@ -417,13 +419,16 @@ def on_task_complete_import_validated(**kwargs):
     on_task_complete_action(SocialProtectionConfig.validation_import_group_valid_items, **kwargs)
 
 
-def _delete_rejected(uuids_list, task_source):
+def _delete_rejected(uuids_list, task_source, upload_id):
     # Use soft delete to remove atomic tasks, it's not possible to mark them on level of Individual.
+    # Only sources of the task's own upload are rejected.
+    if upload_id is None:
+        return
     model = IndividualDataSource
     if task_source == 'import_group_valid_items':
         model = GroupDataSource
 
-    sources_to_update = model.objects.filter(id__in=uuids_list)
+    sources_to_update = model.objects.filter(id__in=uuids_list, upload_id=upload_id)
 
     # Set is_deleted to True for each instance
     for source in sources_to_update:
@@ -485,7 +490,7 @@ def _resolve_task_any(_task: Task, _user):
             accept = _task.business_status[user_id_str].get('ACCEPT', [])
             reject = _task.business_status[user_id_str].get('REJECT', [])
 
-        _delete_rejected(reject, _task.source)
+        _delete_rejected(reject, _task.source, upload_record.data_upload_id if upload_record else None)
         _complete_task_for_accepted(_task, accept, _user)
 
 
@@ -539,5 +544,6 @@ def on_task_resolve(**kwargs):
 
             resolvers[task.task_group.completion_policy](task, user)
     except Exception as e:
-        logger.error("Error while executing on_task_resolve", exc_info=e)
+        task_id = (((kwargs.get('result') or {}).get('data') or {}).get('task') or {}).get('id')
+        logger.error("Task %s was not resolved: %s", task_id, e, exc_info=e)
         return [str(e)]
