@@ -18,6 +18,7 @@ from individual.models import (
 )
 from individual.services import GroupService
 from social_protection.apps import SocialProtectionConfig
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from social_protection.models import (
     Beneficiary,
     BenefitPlanDataUploadRecords,
@@ -321,6 +322,9 @@ def on_task_complete_action(business_event, **kwargs):
     upload_record = None
     try:
         upload_record = BenefitPlanDataUploadRecords.objects.get(id=task['entity_id'])
+        assert_benefit_plan_in_scope(
+            User.objects.get(id=data['user']['id']), upload_record.benefit_plan_id
+        )
         if business_event == SocialProtectionConfig.validation_import_valid_items:
             workflow = SocialProtectionConfig.validation_import_valid_items_workflow
             IndividualItemsImportTaskCompletionEvent(
@@ -435,6 +439,7 @@ def _complete_task_for_accepted(_task, accept, user):
 
     if not upload_record:
         return
+    assert_benefit_plan_in_scope(user, upload_record.benefit_plan_id)
 
     if _task.business_event == SocialProtectionConfig.validation_import_valid_items:
         IndividualItemsImportTaskCompletionEvent(

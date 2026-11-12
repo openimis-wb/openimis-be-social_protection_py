@@ -6,6 +6,7 @@ from core.models import User
 from social_protection.apps import SocialProtectionConfig
 from social_protection.services import BenefitPlanService, BeneficiaryService, GroupBeneficiaryService, GroupBeneficiary
 from social_protection.models import BenefitPlan, Beneficiary, BeneficiaryStatus
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from social_protection.signals.on_validation_import_valid_items import on_task_complete_import_validated, \
     on_task_resolve
 
@@ -30,6 +31,7 @@ def bind_service_signals():
                 task_status = task['status']
                 if task_status == Task.Status.COMPLETED:
                     benefit_plan = BenefitPlan.objects.get(id=task['entity_id'])
+                    assert_benefit_plan_in_scope(user, benefit_plan)
                     from core import datetime
                     now = datetime.datetime.now()
                     benefit_plan.date_valid_to = now

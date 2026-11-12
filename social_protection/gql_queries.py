@@ -24,6 +24,8 @@ from social_protection.models import (
     GroupBeneficiaryProjectTimeEntry,
     BeneficiaryProjectEnrollment,
     GroupBeneficiaryProjectEnrollment,
+    Programme,
+    UserProgramme,
 )
 
 
@@ -41,6 +43,60 @@ class JsonExtMixin:
         if _have_permissions(info.context.user, perms):
             return self.json_ext
         return None
+
+
+class ProgrammeGQLType(DjangoObjectType):
+    uuid = graphene.String(source='uuid')
+
+    class Meta:
+        model = Programme
+        interfaces = (graphene.relay.Node,)
+        fields = (
+            "id", "code", "name", "description", "is_deleted",
+            "date_created", "date_updated", "date_valid_from",
+            "date_valid_to", "version",
+        )
+        filter_fields = {
+            "id": ["exact"],
+            "code": ["exact", "iexact", "startswith", "istartswith",
+                     "contains", "icontains"],
+            "name": ["exact", "iexact", "startswith", "istartswith",
+                     "contains", "icontains"],
+            "is_deleted": ["exact"],
+        }
+        connection_class = ExtendedConnection
+
+
+class UserProgrammeGQLType(DjangoObjectType):
+    """Membership of a user in a programme; the user is exposed through scalar fields only."""
+    uuid = graphene.String(source='uuid')
+    user_id = graphene.String()
+    username = graphene.String()
+    last_name = graphene.String()
+    other_names = graphene.String()
+
+    class Meta:
+        model = UserProgramme
+        interfaces = (graphene.relay.Node,)
+        fields = ("id", "programme", "is_default", "date_created")
+        filter_fields = {
+            "id": ["exact"],
+            "is_default": ["exact"],
+            "user__username": ["exact", "iexact", "istartswith", "icontains"],
+        }
+        connection_class = ExtendedConnection
+
+    def resolve_user_id(self, info):
+        return str(self.user_id)
+
+    def resolve_username(self, info):
+        return self.user.username
+
+    def resolve_last_name(self, info):
+        return getattr(self.user.i_user, "last_name", None)
+
+    def resolve_other_names(self, info):
+        return getattr(self.user.i_user, "other_names", None)
 
 
 class BenefitPlanGQLType(DjangoObjectType, JsonExtMixin):
@@ -70,6 +126,7 @@ class BenefitPlanGQLType(DjangoObjectType, JsonExtMixin):
             "version": ["exact"],
             "description": ["exact", "iexact", "startswith", "istartswith",
                             "contains", "icontains"],
+            "programme__id": ["exact"],
         }
         connection_class = ExtendedConnection
 

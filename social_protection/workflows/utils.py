@@ -13,6 +13,7 @@ from core.models import User
 from individual.models import IndividualDataSource
 from social_protection.apps import SocialProtectionConfig
 from social_protection.models import BenefitPlan
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from social_protection.services import BeneficiaryImportService
 from social_protection.utils import load_dataframe
 from workflow.exceptions import PythonWorkflowHandlerException
@@ -27,6 +28,7 @@ class BasePythonWorkflowExecutor(metaclass=ABCMeta):
         self.upload_uuid = upload_uuid
         self.user_uuid = user_uuid
         self.user = User.objects.get(id=self.user_uuid)
+        assert_benefit_plan_in_scope(self.user, self.benefit_plan_uuid)
         self.accepted = accepted
         self._load_df()
 
