@@ -8,9 +8,26 @@ from social_protection.models import (
 )
 from social_protection.programme_scope import (
     assert_benefit_plan_in_scope,
+    assert_can_change_programme,
+    assert_can_create_in_programme,
     assert_can_manage_programme,
-    assert_can_set_programme,
+    write_scope,
 )
+
+
+def assert_row_in_write_scope(user, model, row_id, target_benefit_plan=None):
+    """
+    The current benefit plan of the `model` row `row_id` and, when given, the
+    target benefit plan must be in the user's write scope. Rows are looked up
+    only when the scope is restricted.
+    """
+    scope = write_scope(user)
+    if scope is None:
+        return
+    if row_id is not None:
+        current = model.objects.filter(id=row_id).values_list('benefit_plan_id', flat=True).first()
+        assert_benefit_plan_in_scope(user, current, scope=scope)
+    assert_benefit_plan_in_scope(user, target_benefit_plan, scope=scope)
 
 
 class BenefitPlanValidation(BaseModelValidation, ObjectExistsValidationMixin):
@@ -21,8 +38,7 @@ class BenefitPlanValidation(BaseModelValidation, ObjectExistsValidationMixin):
         errors = validate_benefit_plan(data)
         if errors:
             raise ValidationError(errors)
-        if data.get('programme_id') is not None:
-            assert_can_set_programme(user, data['programme_id'])
+        assert_can_create_in_programme(user, data.get('programme_id'))
         super().validate_create(user, **data)
 
     @classmethod
@@ -31,11 +47,10 @@ class BenefitPlanValidation(BaseModelValidation, ObjectExistsValidationMixin):
         errors = validate_benefit_plan(data, uuid)
         if errors:
             raise ValidationError(errors)
-        benefit_plan = BenefitPlan.objects.filter(id=uuid).first()
-        if benefit_plan:
-            assert_benefit_plan_in_scope(user, benefit_plan)
-            if 'programme_id' in data:
-                assert_can_set_programme(user, data['programme_id'], benefit_plan.programme_id)
+        assert_benefit_plan_in_scope(user, uuid)
+        if 'programme_id' in data:
+            current = BenefitPlan.objects.filter(id=uuid).values_list('programme_id', flat=True).first()
+            assert_can_change_programme(user, data['programme_id'], current)
         super().validate_update(user, **data)
 
     @classmethod
@@ -107,28 +122,18 @@ class BenefitPlanScopeValidationMixin:
     SCOPED_MODEL = None
 
     @classmethod
-    def _assert_row_in_scope(cls, user, row_id):
-        if row_id is None:
-            return
-        benefit_plan_id = cls.SCOPED_MODEL.objects.filter(id=row_id).values_list(
-            'benefit_plan_id', flat=True
-        ).first()
-        assert_benefit_plan_in_scope(user, benefit_plan_id)
-
-    @classmethod
     def validate_create(cls, user, **data):
-        assert_benefit_plan_in_scope(user, data.get('benefit_plan_id'))
+        assert_row_in_write_scope(user, cls.SCOPED_MODEL, None, data.get('benefit_plan_id'))
         super().validate_create(user, **data)
 
     @classmethod
     def validate_update(cls, user, **data):
-        cls._assert_row_in_scope(user, data.get('id'))
-        assert_benefit_plan_in_scope(user, data.get('benefit_plan_id'))
+        assert_row_in_write_scope(user, cls.SCOPED_MODEL, data.get('id'), data.get('benefit_plan_id'))
         super().validate_update(user, **data)
 
     @classmethod
     def validate_delete(cls, user, **data):
-        cls._assert_row_in_scope(user, data.get('id'))
+        assert_row_in_write_scope(user, cls.SCOPED_MODEL, data.get('id'))
         super().validate_delete(user, **data)
 
 
@@ -157,20 +162,17 @@ class ProjectValidation(BaseModelValidation, ObjectExistsValidationMixin):
 
     @classmethod
     def validate_create(cls, user, **data):
-        assert_benefit_plan_in_scope(user, _project_benefit_plan(data))
+        assert_row_in_write_scope(user, Project, None, _project_benefit_plan(data))
         super().validate_create(user, **data)
 
     @classmethod
     def validate_update(cls, user, **data):
-        current = Project.objects.filter(id=data.get('id')).values_list('benefit_plan_id', flat=True).first()
-        assert_benefit_plan_in_scope(user, current)
-        assert_benefit_plan_in_scope(user, _project_benefit_plan(data))
+        assert_row_in_write_scope(user, Project, data.get('id'), _project_benefit_plan(data))
         super().validate_update(user, **data)
 
     @classmethod
     def validate_delete(cls, user, **data):
-        current = Project.objects.filter(id=data.get('id')).values_list('benefit_plan_id', flat=True).first()
-        assert_benefit_plan_in_scope(user, current)
+        assert_row_in_write_scope(user, Project, data.get('id'))
         super().validate_delete(user, **data)
 
     @classmethod
@@ -238,7 +240,7 @@ class ProgrammeValidation(BaseModelValidation, ObjectExistsValidationMixin):
         programme_id = data.get('id')
         cls.validate_object_exists(programme_id)
         assert_can_manage_programme(user, programme_id)
-        if BenefitPlan.objects.filter(programme_id=programme_id, is_deleted=False).exists():
+        if BenefitPlan.objects.filter(programme_id=programme_id).exists():
             raise ValidationError(_("social_protection.validation.programme.has_benefit_plans"))
         super().validate_delete(user, **data)
 

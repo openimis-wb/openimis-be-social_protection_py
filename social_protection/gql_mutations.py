@@ -56,6 +56,10 @@ class CreateBenefitPlanInputType(OpenIMISMutation.Input):
 
 class UpdateBenefitPlanInputType(CreateBenefitPlanInputType):
     id = graphene.UUID(required=True)
+    detach_programme = graphene.Boolean(
+        required=False,
+        description="True removes the benefit plan from its programme; cannot be combined with programmeId",
+    )
 
 
 class CreateGenericBeneficiaryInputType(OpenIMISMutation.Input):
@@ -161,6 +165,8 @@ class UpdateBenefitPlanMutation(
             user, SocialProtectionConfig.gql_schema_update_perms,
             data, 'json_ext'
         )
+        if data.get('detach_programme') and data.get('programme_id') is not None:
+            raise ValidationError("social_protection.programme.detach_with_programme")
 
     @classmethod
     def _mutate(cls, user, **data):
@@ -170,6 +176,8 @@ class UpdateBenefitPlanMutation(
             data.pop('client_mutation_id')
         if "client_mutation_label" in data:
             data.pop('client_mutation_label')
+        if data.pop('detach_programme', False):
+            data['programme_id'] = None
 
         service = BenefitPlanService(user)
         if SocialProtectionConfig.gql_check_benefit_plan_update:

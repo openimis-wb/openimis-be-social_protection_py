@@ -65,11 +65,8 @@ from social_protection.models import (
 )
 from social_protection.programme_scope import (
     assert_can_manage_programme,
-    is_superuser,
     scope_benefit_plans,
-    scope_by_current_rows,
     scope_queryset,
-    user_programme_ids,
 )
 from social_protection.validation import (
     validate_bf_unique_code,
@@ -318,10 +315,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             SocialProtectionConfig.gql_benefit_plan_search_perms
         )
 
-        query = scope_benefit_plans(
-            BenefitPlan.objects.filter(*filters),
-            info.context.user, info.context
-        )
+        query = BenefitPlan.objects.filter(*filters)
 
         sort_alphabetically = kwargs.get("sort_alphabetically", None)
         if sort_alphabetically:
@@ -416,7 +410,6 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             )
 
         query = Beneficiary.get_queryset(None, info.context.user)
-        query = scope_queryset(query, info.context.user, info.context)
         query = _apply_custom_filters(query.filter(*filters), **kwargs)
 
         eligible_uuids, check_performed = _get_eligible_uuids(
@@ -518,7 +511,6 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             )
 
         query = GroupBeneficiary.get_queryset(None, info.context.user)
-        query = scope_queryset(query, info.context.user, info.context)
         query = _apply_custom_filters(query.filter(*filters), **kwargs)
 
         eligible_group_uuids, check_performed = _get_eligible_group_uuids(
@@ -580,10 +572,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             info.context.user,
             SocialProtectionConfig.gql_beneficiary_search_perms
         )
-        query = scope_queryset(
-            BenefitPlanDataUploadRecords.objects.filter(*filters),
-            info.context.user, info.context
-        )
+        query = BenefitPlanDataUploadRecords.objects.filter(*filters)
         return gql_optimizer.query(query, info)
 
     def resolve_benefit_plan_schema_field(self, info, **kwargs):
@@ -650,10 +639,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             SocialProtectionConfig.gql_benefit_plan_search_perms
         )
 
-        query = scope_by_current_rows(
-            BenefitPlan.history.filter(*filters), BenefitPlan,
-            info.context.user, info.context, benefit_plan_path=""
-        )
+        query = BenefitPlan.history.filter(*filters)
 
         sort_alphabetically = kwargs.get("sort_alphabetically", None)
         if sort_alphabetically:
@@ -711,10 +697,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             descendant_ids = extend_allowed_locations([location.pk])
             filters.append(Q(location__id__in=descendant_ids))
 
-        query = scope_queryset(
-            Project.objects.filter(*filters),
-            info.context.user, info.context
-        )
+        query = Project.objects.filter(*filters)
         return gql_optimizer.query(query, info)
 
     def resolve_project_name_validity(self, info, **kwargs):
@@ -754,10 +737,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             SocialProtectionConfig.gql_project_search_perms
         )
 
-        query = scope_by_current_rows(
-            Project.history.filter(*filters), Project,
-            info.context.user, info.context
-        )
+        query = Project.history.filter(*filters)
 
         sort_alphabetically = kwargs.get("sort_alphabetically", None)
         if sort_alphabetically:
@@ -769,9 +749,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
         Query._check_permissions(
             user, SocialProtectionConfig.gql_programme_search_perms
         )
-        query = Programme.objects.all()
-        if not is_superuser(user):
-            query = query.filter(id__in=user_programme_ids(user))
+        query = Programme.objects.order_by("code")
         return gql_optimizer.query(query, info)
 
     def resolve_my_programmes(self, info, **kwargs):
@@ -791,7 +769,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
         assert_can_manage_programme(user, programme_id)
         query = UserProgramme.objects.filter(
             programme_id=programme_id, is_deleted=False,
-        ).select_related("user", "user__i_user")
+        ).select_related("user", "user__i_user").order_by("user__username")
         return gql_optimizer.query(query, info)
 
 

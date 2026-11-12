@@ -8,13 +8,9 @@ from django.test.utils import CaptureQueriesContext
 from social_protection.models import Beneficiary, BenefitPlan, Programme, Project
 from social_protection.programme_scope import (
     INVALID_HEADER_MESSAGE,
-    NOT_A_MEMBER_MESSAGE,
     OUT_OF_SCOPE_MESSAGE,
-    PROGRAMME_NOT_FOUND_MESSAGE,
     ProgrammeScopeError,
     assert_benefit_plan_in_scope,
-    assert_can_set_programme,
-    can_access_benefit_plan,
     get_programme_scope,
     scope_benefit_plans,
     scope_queryset,
@@ -138,39 +134,22 @@ class ProgrammeScopeTest(TestCase):
         with self.assertNumQueries(0):
             get_programme_scope(self.admin, _request())
 
-    def test_can_access_and_assert_use_membership(self):
-        self.assertTrue(can_access_benefit_plan(self.member_a, self.plan_a))
-        self.assertTrue(can_access_benefit_plan(self.member_a, self.plan_none.id))
-        self.assertFalse(can_access_benefit_plan(self.member_a, self.plan_b))
-        self.assertFalse(can_access_benefit_plan(self.member_a, uuid.uuid4()))
-        assert_benefit_plan_in_scope(self.member_a, self.plan_a.id)
-        assert_benefit_plan_in_scope(self.member_a, uuid.uuid4())
-        with self.assertRaisesMessage(ProgrammeScopeError, OUT_OF_SCOPE_MESSAGE):
-            assert_benefit_plan_in_scope(self.member_a, self.plan_b.id)
+    def test_assert_uses_membership_and_refuses_unknown_ids(self):
+        assert_benefit_plan_in_scope(self.member_a, self.plan_a)
+        assert_benefit_plan_in_scope(self.member_a, self.plan_none.id)
+        assert_benefit_plan_in_scope(self.member_a, None)
+        for refused in (self.plan_b, self.plan_b.id, uuid.uuid4(), "not-a-uuid"):
+            with self.subTest(refused=refused):
+                with self.assertRaisesMessage(ProgrammeScopeError, OUT_OF_SCOPE_MESSAGE):
+                    assert_benefit_plan_in_scope(self.member_a, refused)
 
-    def test_can_access_with_request_applies_the_header(self):
+    def test_assert_with_request_applies_the_header(self):
         request = _request(self.programme_b.id)
-        self.assertTrue(can_access_benefit_plan(self.member_ab, self.plan_b, request))
-        self.assertFalse(can_access_benefit_plan(self.member_ab, self.plan_a, request))
-        self.assertFalse(can_access_benefit_plan(self.member_ab, self.plan_none, request))
-
-    def test_setting_a_programme_requires_membership_of_target_and_current(self):
-        assert_can_set_programme(self.member_a, self.programme_a.id)
-        assert_can_set_programme(self.member_a, None, self.programme_a.id)
-        assert_can_set_programme(self.member_ab, self.programme_b.id, self.programme_a.id)
-        with self.assertRaisesMessage(ProgrammeScopeError, NOT_A_MEMBER_MESSAGE):
-            assert_can_set_programme(self.member_a, self.programme_b.id)
-        with self.assertRaisesMessage(ProgrammeScopeError, NOT_A_MEMBER_MESSAGE):
-            assert_can_set_programme(self.member_b, self.programme_b.id, self.programme_a.id)
-        with self.assertRaisesMessage(ProgrammeScopeError, NOT_A_MEMBER_MESSAGE):
-            assert_can_set_programme(self.member_a, None, self.programme_b.id)
-
-    def test_superuser_sets_any_live_programme_but_not_an_unknown_one(self):
-        assert_can_set_programme(self.admin, self.programme_b.id, self.programme_a.id)
-        for target in (uuid.uuid4(), self.programme_deleted.id):
-            with self.subTest(target=target):
-                with self.assertRaisesMessage(ProgrammeScopeError, PROGRAMME_NOT_FOUND_MESSAGE):
-                    assert_can_set_programme(self.admin, target)
+        assert_benefit_plan_in_scope(self.member_ab, self.plan_b, request)
+        for refused in (self.plan_a, self.plan_none):
+            with self.subTest(refused=refused.code):
+                with self.assertRaisesMessage(ProgrammeScopeError, OUT_OF_SCOPE_MESSAGE):
+                    assert_benefit_plan_in_scope(self.member_ab, refused, request)
 
 
 class ZeroProgrammeDeploymentTest(TestCase):

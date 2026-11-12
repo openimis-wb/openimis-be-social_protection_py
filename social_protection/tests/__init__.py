@@ -9,5 +9,10 @@ from .test_workflows_beneficiaries_upload import ProcessImportBeneficiariesWorkf
 from .test_workflows_beneficiaries_update import ProcessUpdateBeneficiariesWorkflowTest
 from .activity_gql_test import ActivitiesGQLTest
 from .project_gql_test import ProjectsGQLTest
+from .programme_scope_test import ProgrammeScopeTest, ZeroProgrammeDeploymentTest
+from .programme_gql_test import ProgrammeGQLTest
+from .programme_type_scope_test import ProgrammeTypeScopeTest
+from .programme_write_scope_test import ProgrammeWriteScopeTest, ProgrammeRestScopeTest, ZeroProgrammeWriteCostTest
+from .attach_programme_command_test import AttachProgrammeCommandTest
 # TODO: implement group upload workflow
 # from .group_import_gql_test import GroupBeneficiaryImportGQLTest

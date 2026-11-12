@@ -4,7 +4,7 @@ import pandas as pd
 import mimetypes
 import os
 
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.http import StreamingHttpResponse
 from django.utils.translation import gettext as _
@@ -62,6 +62,28 @@ def _forbidden(exc):
     )
 
 
+def _not_found(message):
+    return Response(
+        {'success': False, 'error': message},
+        status=status.HTTP_404_NOT_FOUND
+    )
+
+
+def _find_benefit_plan(benefit_plan_id, **filters):
+    """The benefit plan with `benefit_plan_id`, or None for a missing or malformed id."""
+    try:
+        return BenefitPlan.objects.filter(id=benefit_plan_id, **filters).first()
+    except (ValidationError, ValueError):
+        return None
+
+
+def _is_plain_file_name(filename):
+    """A bare file name: no directory part and no parent reference."""
+    if not filename or filename in ('.', '..') or '\\' in filename:
+        return False
+    return os.path.basename(filename) == filename
+
+
 def get_global_schema_fields(benefit_plan):
     schema = (benefit_plan.beneficiary_data_schema
               if benefit_plan.beneficiary_data_schema
@@ -79,9 +101,9 @@ def get_global_schema_fields(benefit_plan):
 )])
 def download_template_benefit_plan_file(request):
     benefit_plan_uuid = request.GET.get('benefit_plan_uuid')
-    benefit_plan = BenefitPlan.objects.filter(
-        id=benefit_plan_uuid, is_deleted=False
-    ).first()
+    benefit_plan = _find_benefit_plan(benefit_plan_uuid, is_deleted=False)
+    if benefit_plan is None:
+        return _not_found(_('Benefit plan not found'))
     try:
         assert_benefit_plan_in_scope(request.user, benefit_plan, request)
     except PermissionDenied as exc:
@@ -300,12 +322,19 @@ def download_invalid_items(request):
 )])
 def download_beneficiary_upload(request):
     try:
-        benefit_plan_id = request.query_params.get('benefit_plan_id')
+        benefit_plan = _find_benefit_plan(request.query_params.get('benefit_plan_id'))
+        if benefit_plan is None:
+            return _not_found(_('Benefit plan not found'))
+        assert_benefit_plan_in_scope(request.user, benefit_plan, request)
         filename = request.query_params.get('filename')
-        assert_benefit_plan_in_scope(request.user, benefit_plan_id, request)
+        if not _is_plain_file_name(filename):
+            return Response(
+                {'success': False, 'error': _('Invalid file name')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         target_file_path = (
             SocialProtectionConfig.get_beneficiary_upload_file_path(
-                benefit_plan_id, filename
+                benefit_plan.id, filename
             )
         )
         file_handler = DefaultStorageFileHandler(target_file_path)

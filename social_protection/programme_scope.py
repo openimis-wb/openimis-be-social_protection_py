@@ -13,6 +13,8 @@ Programme scope of benefit plans and of the rows they own.
 
 Read paths pass the request so the header applies; write paths call
 `assert_benefit_plan_in_scope` without a request and check membership only.
+Writes by superusers, and writes while no benefit plan is attached to any
+programme, return before any benefit plan lookup.
 The scope costs one query, computed once per request and kept on the request
 object. While no benefit plan is attached to any programme, read querysets
 are left unfiltered.
@@ -25,14 +27,16 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Exists, OuterRef, Q
 
 PROGRAMME_HEADER = "X-Programme"
-PROGRAMME_HEADER_META_KEY = "HTTP_X_PROGRAMME"
+PROGRAMME_HEADER_META_KEY = "HTTP_" + PROGRAMME_HEADER.upper().replace("-", "_")
 
 INVALID_HEADER_MESSAGE = "social_protection.programme.invalid_header"
 OUT_OF_SCOPE_MESSAGE = "social_protection.programme.benefit_plan_out_of_scope"
 NOT_A_MEMBER_MESSAGE = "social_protection.programme.not_a_member"
 PROGRAMME_NOT_FOUND_MESSAGE = "social_protection.programme.not_found"
+CHANGE_REQUIRES_SUPERUSER_MESSAGE = "social_protection.programme.change_requires_superuser"
 
 _REQUEST_CACHE_ATTR = "_social_protection_programme_scope"
+_MEMBERSHIP_CACHE_ATTR = "_social_protection_programme_memberships"
 
 
 class ProgrammeScopeError(PermissionDenied):
@@ -63,6 +67,11 @@ class ProgrammeScope:
         if self.programme_ids:
             q |= Q(**{f"{prefix}programme_id__in": self.programme_ids})
         return q
+
+    @property
+    def is_unrestricted(self):
+        """True when every benefit plan is in scope."""
+        return self.benefit_plan_q("") is None
 
     def allows_programme(self, programme_id):
         """True when a benefit plan attached to `programme_id` (None: no programme) is in scope."""
@@ -206,12 +215,59 @@ def scope_by_current_rows(queryset, model, user, request=None, benefit_plan_path
     return queryset.filter(id__in=model.objects.filter(q).values("id"))
 
 
+def member_programme_ids(user, request=None):
+    """Live programmes of the user, independent of the `X-Programme` header; kept on the request."""
+    user_key = getattr(user, "id", None)
+    if request is not None:
+        cached = getattr(request, _MEMBERSHIP_CACHE_ATTR, None)
+        if cached is not None and cached[0] == user_key:
+            return cached[1]
+    programme_ids = user_programme_ids(user)
+    if request is not None:
+        try:
+            setattr(request, _MEMBERSHIP_CACHE_ATTR, (user_key, programme_ids))
+        except AttributeError:
+            pass
+    return programme_ids
+
+
+def scope_programmes(queryset, user, request=None):
+    """Superusers see every programme; other users the live programmes they belong to."""
+    if is_superuser(user):
+        return queryset
+    return queryset.filter(id__in=member_programme_ids(user, request))
+
+
+def scope_memberships(queryset, user, request=None, include_co_members=False):
+    """
+    Superusers see every membership; other users their own and, with
+    `include_co_members`, the live memberships of their programmes.
+    """
+    if is_superuser(user):
+        return queryset
+    if not _is_authenticated(user):
+        return queryset.none()
+    q = Q(user_id=user.id)
+    if include_co_members:
+        q |= Q(programme_id__in=member_programme_ids(user, request), is_deleted=False)
+    return queryset.filter(q)
+
+
+def write_scope(user):
+    """
+    Scope a write by `user` is checked against, or None when the user may write
+    on every benefit plan (superuser, or no benefit plan attached anywhere).
+    """
+    if is_superuser(user):
+        return None
+    scope = get_programme_scope(user)
+    return None if scope.is_unrestricted else scope
+
+
 def _programme_id_of(benefit_plan):
     from social_protection.models import BenefitPlan
     if isinstance(benefit_plan, BenefitPlan):
         return True, benefit_plan.programme_id
-    if benefit_plan is None:
-        return False, None
     try:
         rows = list(BenefitPlan.objects.filter(id=benefit_plan).values_list("programme_id", flat=True)[:1])
     except (ValidationError, ValueError):
@@ -221,37 +277,33 @@ def _programme_id_of(benefit_plan):
     return True, rows[0]
 
 
-def can_access_benefit_plan(user, benefit_plan, request=None):
+def assert_benefit_plan_in_scope(user, benefit_plan, request=None, scope=None):
     """
-    True when `benefit_plan` (instance or id) exists and is in the user's scope.
-    Without a request, membership alone decides.
+    Raise `ProgrammeScopeError` unless `benefit_plan` (instance or id) is in the
+    user's scope. None is skipped. When the scope is restricted, an id that
+    matches no benefit plan is refused.
     """
-    scope = get_programme_scope(user, request)
-    if scope.is_authenticated and scope.is_superuser and scope.active_programme_id is None:
-        return True
-    exists, programme_id = _programme_id_of(benefit_plan)
-    return exists and scope.allows_programme(programme_id)
-
-
-def assert_benefit_plan_in_scope(user, benefit_plan, request=None):
-    """
-    Raise `ProgrammeScopeError` when `benefit_plan` (instance or id) exists and
-    is out of the user's scope. A missing benefit plan is left to the caller's
-    own existence check.
-    """
-    scope = get_programme_scope(user, request)
-    if scope.is_authenticated and scope.is_superuser and scope.active_programme_id is None:
+    if benefit_plan is None:
         return
+    if scope is None:
+        if request is None:
+            scope = write_scope(user)
+            if scope is None:
+                return
+        else:
+            scope = get_programme_scope(user, request)
+            if scope.is_unrestricted:
+                return
     exists, programme_id = _programme_id_of(benefit_plan)
-    if exists and not scope.allows_programme(programme_id):
+    if not exists or not scope.allows_programme(programme_id):
         raise ProgrammeScopeError(OUT_OF_SCOPE_MESSAGE)
 
 
-def assert_benefit_plans_in_scope(user, benefit_plan_ids):
-    """Raise `ProgrammeScopeError` when any of the existing benefit plans in `benefit_plan_ids` is out of scope."""
+def assert_benefit_plans_in_scope(user, benefit_plan_ids, scope=None):
+    """Raise `ProgrammeScopeError` when any existing benefit plan in `benefit_plan_ids` is out of scope."""
     from social_protection.models import BenefitPlan
-    scope = get_programme_scope(user)
-    if scope.is_authenticated and scope.is_superuser:
+    scope = scope or write_scope(user)
+    if scope is None:
         return
     ids = {bp_id for bp_id in benefit_plan_ids if bp_id is not None}
     if not ids:
@@ -288,21 +340,32 @@ def _as_uuid(value):
         raise ProgrammeScopeError(PROGRAMME_NOT_FOUND_MESSAGE)
 
 
-def assert_can_set_programme(user, target_programme_id, current_programme_id=None):
-    """
-    Attaching a benefit plan to `target_programme_id` (None: no programme)
-    requires a live target programme and, for users other than superusers,
-    membership of the target and of the current programme when moving.
-    """
+def _assert_live_programme(programme_id):
     from social_protection.models import Programme
+    if not Programme.objects.filter(id=programme_id, is_deleted=False).exists():
+        raise ProgrammeScopeError(PROGRAMME_NOT_FOUND_MESSAGE)
+
+
+def assert_can_create_in_programme(user, programme_id):
+    """A new benefit plan goes into a live programme the creator belongs to; superusers use any live one."""
+    programme_id = _as_uuid(programme_id)
+    if programme_id is None:
+        return
+    _assert_live_programme(programme_id)
+    if not is_superuser(user) and not is_programme_member(user, programme_id):
+        raise ProgrammeScopeError(NOT_A_MEMBER_MESSAGE)
+
+
+def assert_can_change_programme(user, target_programme_id, current_programme_id):
+    """
+    Attaching, moving or detaching an existing benefit plan is reserved to
+    superusers; keeping its current programme is not a change.
+    """
     target_programme_id = _as_uuid(target_programme_id)
     current_programme_id = _as_uuid(current_programme_id)
-    if target_programme_id is not None and not Programme.objects.filter(
-        id=target_programme_id, is_deleted=False
-    ).exists():
-        raise ProgrammeScopeError(PROGRAMME_NOT_FOUND_MESSAGE)
-    if is_superuser(user) or target_programme_id == current_programme_id:
+    if target_programme_id == current_programme_id:
         return
-    for programme_id in {target_programme_id, current_programme_id}:
-        if programme_id is not None and not is_programme_member(user, programme_id):
-            raise ProgrammeScopeError(NOT_A_MEMBER_MESSAGE)
+    if not is_superuser(user):
+        raise ProgrammeScopeError(CHANGE_REQUIRES_SUPERUSER_MESSAGE)
+    if target_programme_id is not None:
+        _assert_live_programme(target_programme_id)

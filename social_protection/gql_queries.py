@@ -13,6 +13,12 @@ from individual.gql_queries import IndividualGQLType, GroupGQLType, \
     IndividualDataSourceUploadGQLType
 from location.models import Location
 from social_protection.apps import SocialProtectionConfig
+from social_protection.programme_scope import (
+    scope_by_current_rows,
+    scope_memberships,
+    scope_programmes,
+    scope_queryset,
+)
 from social_protection.models import (
     Beneficiary,
     BenefitPlan,
@@ -37,6 +43,21 @@ def _have_permissions(user, permission):
     return user.has_perms(permission)
 
 
+class BenefitPlanScopedTypeMixin:
+    """
+    Restricts every queryset graphene-django resolves for the type (root and
+    nested connections, list fields, `node`) to rows whose benefit plans,
+    reached through each of `benefit_plan_paths`, are in the programme scope.
+    """
+    benefit_plan_paths = ("benefit_plan",)
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        for path in cls.benefit_plan_paths:
+            queryset = scope_queryset(queryset, info.context.user, info.context, path)
+        return queryset
+
+
 class JsonExtMixin:
     def resolve_json_ext(self, info):
         perms = SocialProtectionConfig.gql_schema_search_perms
@@ -47,6 +68,10 @@ class JsonExtMixin:
 
 class ProgrammeGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return scope_programmes(queryset, info.context.user, info.context)
 
     class Meta:
         model = Programme
@@ -86,6 +111,14 @@ class UserProgrammeGQLType(DjangoObjectType):
         }
         connection_class = ExtendedConnection
 
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        user = info.context.user
+        return scope_memberships(
+            queryset, user, info.context,
+            include_co_members=_have_permissions(user, SocialProtectionConfig.gql_programme_update_perms),
+        )
+
     def resolve_user_id(self, info):
         return str(self.user_id)
 
@@ -99,7 +132,8 @@ class UserProgrammeGQLType(DjangoObjectType):
         return getattr(self.user.i_user, "other_names", None)
 
 
-class BenefitPlanGQLType(DjangoObjectType, JsonExtMixin):
+class BenefitPlanGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin):
+    benefit_plan_paths = ("",)
     uuid = graphene.String(source='uuid')
     has_payment_plans = graphene.Boolean()
 
@@ -140,14 +174,18 @@ class BenefitPlanGQLType(DjangoObjectType, JsonExtMixin):
         return PaymentPlan.objects.filter(benefit_plan_id=self.id).exists()
 
 
-class BeneficiaryProjectTimeEntryGQLType(DjangoObjectType):
+class BeneficiaryProjectTimeEntryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType):
+    benefit_plan_paths = ("enrollment__project__benefit_plan", "enrollment__beneficiary__benefit_plan")
+
     class Meta:
         model = BeneficiaryProjectTimeEntry
         fields = ("id", "day_number", "percent_complete")
         interfaces = (graphene.relay.Node,)
 
 
-class GroupBeneficiaryProjectTimeEntryGQLType(DjangoObjectType):
+class GroupBeneficiaryProjectTimeEntryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType):
+    benefit_plan_paths = ("enrollment__project__benefit_plan", "enrollment__group_beneficiary__benefit_plan")
+
     class Meta:
         model = GroupBeneficiaryProjectTimeEntry
         fields = ("id", "day_number", "percent_complete")
@@ -312,7 +350,8 @@ class BeneficiaryFilter(
         )
 
 
-class BeneficiaryProjectEnrollmentGQLType(DjangoObjectType):
+class BeneficiaryProjectEnrollmentGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType):
+    benefit_plan_paths = ("project__benefit_plan", "beneficiary__benefit_plan")
     uuid = graphene.String(source='uuid')
     time_entries = graphene.List(BeneficiaryProjectTimeEntryGQLType)
 
@@ -332,7 +371,7 @@ class BeneficiaryProjectEnrollmentGQLType(DjangoObjectType):
         return gql_optimizer.query(qs, info)
 
 
-class BeneficiaryGQLType(DjangoObjectType, JsonExtMixin):
+class BeneficiaryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
     is_eligible = graphene.Boolean()
     project_enrollments = graphene.List(BeneficiaryProjectEnrollmentGQLType)
@@ -417,7 +456,8 @@ class GroupBeneficiaryFilter(
         )
 
 
-class GroupBeneficiaryProjectEnrollmentGQLType(DjangoObjectType):
+class GroupBeneficiaryProjectEnrollmentGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType):
+    benefit_plan_paths = ("project__benefit_plan", "group_beneficiary__benefit_plan")
     uuid = graphene.String(source='uuid')
     time_entries = graphene.List(GroupBeneficiaryProjectTimeEntryGQLType)
 
@@ -437,7 +477,7 @@ class GroupBeneficiaryProjectEnrollmentGQLType(DjangoObjectType):
         return gql_optimizer.query(qs, info)
 
 
-class GroupBeneficiaryGQLType(DjangoObjectType, JsonExtMixin):
+class GroupBeneficiaryGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
     is_eligible = graphene.Boolean()
     project_enrollments = graphene.List(
@@ -458,7 +498,7 @@ class GroupBeneficiaryGQLType(DjangoObjectType, JsonExtMixin):
         return gql_optimizer.query(qs, info)
 
 
-class BenefitPlanDataUploadQGLType(DjangoObjectType, JsonExtMixin):
+class BenefitPlanDataUploadQGLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
 
     class Meta:
@@ -499,6 +539,10 @@ class BenefitPlanSchemaFieldsGQLType(ObjectType):
 class BenefitPlanHistoryGQLType(DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
     has_payment_plans = graphene.Boolean()
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return scope_by_current_rows(queryset, BenefitPlan, info.context.user, info.context, benefit_plan_path="")
 
     def resolve_user_updated(self, info):
         return self.user_updated
@@ -581,7 +625,7 @@ class ProjectFilter(django_filters.FilterSet):
         }
 
 
-class ProjectGQLType(DjangoObjectType, JsonExtMixin):
+class ProjectGQLType(BenefitPlanScopedTypeMixin, DjangoObjectType, JsonExtMixin):
     uuid = graphene.String(source='uuid')
 
     class Meta:
@@ -593,6 +637,10 @@ class ProjectGQLType(DjangoObjectType, JsonExtMixin):
 
 class ProjectHistoryGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return scope_by_current_rows(queryset, Project, info.context.user, info.context)
 
     def resolve_user_updated(self, info):
         return self.user_updated

@@ -74,3 +74,9 @@ class AttachProgrammeCommandTest(TestCase):
             self._run("--apply")
         with self.assertRaises(CommandError):
             self._run("--apply", "--username", "nobody-with-this-name")
+
+    def test_code_longer_than_the_column_is_a_command_error(self):
+        with self.assertRaisesMessage(CommandError, "--code"):
+            call_command("attach_programme", "--code", "C" * 33, "--name", "Too long",
+                         "--apply", "--username", self.admin.username, stdout=StringIO())
+        self.assertFalse(Programme.objects.filter(code="C" * 33).exists())

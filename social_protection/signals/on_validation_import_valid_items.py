@@ -468,6 +468,9 @@ def _complete_task_for_accepted(_task, accept, user):
 
 
 def _resolve_task_any(_task: Task, _user):
+    upload_record = BenefitPlanDataUploadRecords.objects.filter(id=_task.entity_id).first()
+    if upload_record:
+        assert_benefit_plan_in_scope(_user, upload_record.benefit_plan_id)
     # Atomic resolution of beneficiaries
     user_id_str = str(_user.id)
     if isinstance(_task.business_status.get(user_id_str), dict):

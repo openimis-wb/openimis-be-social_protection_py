@@ -36,6 +36,7 @@ from social_protection.programme_scope import (
     assert_benefit_plan_in_scope,
     assert_benefit_plans_in_scope,
     is_superuser,
+    write_scope,
 )
 from social_protection.utils import (
     load_dataframe,
@@ -321,15 +322,17 @@ class ProjectEnrollmentService:
         project = Project.objects.get(id=project_id)
         enrollment_model = self.config['enrollment_model']
         fk_field = self.config['fk_field']
-        beneficiary_model = enrollment_model._meta.get_field(
-            fk_field[:-len('_id')]
-        ).related_model
-        assert_benefit_plans_in_scope(self.user, {
-            project.benefit_plan_id,
-            *beneficiary_model.objects.filter(
-                id__in=beneficiary_ids
-            ).values_list('benefit_plan_id', flat=True),
-        })
+        scope = write_scope(self.user)
+        if scope is not None:
+            beneficiary_model = enrollment_model._meta.get_field(
+                fk_field[:-len('_id')]
+            ).related_model
+            assert_benefit_plans_in_scope(self.user, {
+                project.benefit_plan_id,
+                *beneficiary_model.objects.filter(
+                    id__in=beneficiary_ids
+                ).values_list('benefit_plan_id', flat=True),
+            }, scope=scope)
 
         # including deleted
         all_enrollments = {
@@ -408,6 +411,9 @@ class ProjectEnrollmentService:
             raise ValueError(
                 _('Invalid enrollment IDs: %(ids)s') % {'ids': invalid_ids}
             )
+        self._assert_entries_belong_to_their_enrollments(
+            time_entry_model, time_entries_data
+        )
         assert_benefit_plans_in_scope(
             self.user, {e.project.benefit_plan_id for e in enrollments}
         )
@@ -433,6 +439,46 @@ class ProjectEnrollmentService:
             data_list=time_entries_data,
             user=self.user
         )
+
+    @staticmethod
+    def _assert_entries_belong_to_their_enrollments(time_entry_model, time_entries_data):
+        """An entry given with an existing id keeps its enrollment: it is updated only through that enrollment."""
+        requested = {
+            str(entry['id']): str(entry['enrollment_id'])
+            for entry in time_entries_data if entry.get('id')
+        }
+        if not requested:
+            return
+        existing = time_entry_model.objects.filter(
+            id__in=requested.keys()
+        ).values_list('id', 'enrollment_id')
+        foreign = {
+            str(entry_id) for entry_id, enrollment_id in existing
+            if str(enrollment_id) != requested[str(entry_id)]
+        }
+        if foreign:
+            raise ValueError(
+                _('Time entries %(ids)s belong to another enrollment')
+                % {'ids': sorted(foreign)}
+            )
+
+
+UPLOAD_NOT_IN_BENEFIT_PLAN_MESSAGE = "social_protection.validation.upload_not_in_benefit_plan"
+
+
+def assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan):
+    """Refuses an upload that no live upload record links to `benefit_plan` (instance or id)."""
+    benefit_plan_id = getattr(benefit_plan, 'id', benefit_plan)
+    try:
+        linked = BenefitPlanDataUploadRecords.objects.filter(
+            data_upload_id=upload_id,
+            benefit_plan_id=benefit_plan_id,
+            is_deleted=False,
+        ).exists()
+    except (ValidationError, ValueError):
+        linked = False
+    if not linked:
+        raise ValueError(UPLOAD_NOT_IN_BENEFIT_PLAN_MESSAGE)
 
 
 class BeneficiaryImportService:
@@ -493,6 +539,7 @@ class BeneficiaryImportService:
         self, upload_id: uuid, individual_sources, benefit_plan: BenefitPlan
     ):
         assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         dataframe = self._load_dataframe(individual_sources)
         validated_dataframe, invalid_items = (
             self._validate_possible_beneficiaries(
@@ -511,6 +558,7 @@ class BeneficiaryImportService:
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
         assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         if SocialProtectionConfig.enable_maker_checker_for_beneficiary_upload:
             BeneficiaryTaskCreatorService(self.user) \
                 .create_task_with_importing_valid_items(
@@ -537,6 +585,7 @@ class BeneficiaryImportService:
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
         assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         mc_enabled = (
             SocialProtectionConfig.enable_maker_checker_for_beneficiary_update
         )
@@ -568,6 +617,7 @@ class BeneficiaryImportService:
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
         assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         self._synchronize_individual(upload_id)
         self._synchronize_beneficiary(benefit_plan, upload_id)
 

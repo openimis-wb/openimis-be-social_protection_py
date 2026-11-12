@@ -33,6 +33,9 @@ class Command(BaseCommand):
         code = options["code"].strip()
         if not code:
             raise CommandError("--code must not be empty")
+        max_length = Programme._meta.get_field("code").max_length
+        if len(code) > max_length:
+            raise CommandError(f"--code must not exceed {max_length} characters")
         author = None
         if apply:
             if not options.get("username"):

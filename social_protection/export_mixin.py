@@ -6,6 +6,11 @@ import types
 from core.custom_filters import CustomFilterWizardStorage
 from core.models import ExportableQueryModel
 from core.gql.export_mixin import ExportableQueryMixin
+from django.core.exceptions import FieldDoesNotExist
+from django.db.models import JSONField, QuerySet
+from graphene_django.registry import get_global_registry
+
+EXPORT_FIELD_NOT_ALLOWED_MESSAGE = "social_protection.export.field_not_allowed"
 
 logger = logging.getLogger(__file__)
 
@@ -30,7 +35,7 @@ class ExportableSocialProtectionQueryMixin(ExportableQueryMixin):
             source_field = getattr(cls, field_name)
             filter_kwargs = {k: v for k, v in kwargs.items() if k in source_field.filtering_args}
 
-            qs = default_resolve(None, info, **kwargs)
+            qs = cls._exportable_queryset(default_resolve(None, info, **kwargs), export_fields, info)
             qs = qs.filter(**filter_kwargs)
             qs = cls.__append_custom_filters(custom_filters, qs, fields_mapping)
             export_file = ExportableQueryModel\
@@ -64,3 +69,42 @@ class ExportableSocialProtectionQueryMixin(ExportableQueryMixin):
                     relation=related_field
                 )
         return queryset
+
+    @classmethod
+    def _exportable_queryset(cls, queryset, export_fields, info):
+        """
+        Checks the exported field paths and filters the rows through the
+        get_queryset of the GraphQL type registered for the queryset's model,
+        so an export returns what the query field returns.
+        """
+        if not isinstance(queryset, QuerySet):
+            return queryset
+        for path in export_fields:
+            cls._assert_exportable_path(queryset.model, path)
+        node_type = get_global_registry().get_type_for_model(queryset.model)
+        return node_type.get_queryset(queryset, info) if node_type else queryset
+
+    @staticmethod
+    def _assert_exportable_path(model, path):
+        """
+        Exported paths follow local fields and forward relations only; a single
+        unknown name is left to the queryset (annotation), and the segments after
+        a JSON field are keys inside it.
+        """
+        segments = path.split("__")
+        current = model
+        for index, segment in enumerate(segments):
+            try:
+                field = current._meta.get_field(segment)
+            except FieldDoesNotExist:
+                if len(segments) == 1:
+                    return
+                raise ValueError(f"{EXPORT_FIELD_NOT_ALLOWED_MESSAGE}: {path}")
+            if not field.concrete or field.many_to_many:
+                raise ValueError(f"{EXPORT_FIELD_NOT_ALLOWED_MESSAGE}: {path}")
+            if field.is_relation:
+                current = field.related_model
+                continue
+            if isinstance(field, JSONField) or index == len(segments) - 1:
+                return
+            raise ValueError(f"{EXPORT_FIELD_NOT_ALLOWED_MESSAGE}: {path}")
