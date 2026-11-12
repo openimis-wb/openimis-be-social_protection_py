@@ -214,7 +214,7 @@ class DeleteBenefitPlanMutation(
             for obj_id in ids:
                 res = service.delete({'id': obj_id, 'user': user})
                 if not res['success']:
-                    transaction.rollback()
+                    transaction.set_rollback(True)
                     return res
 
     class Input(OpenIMISMutation.Input):
@@ -370,7 +370,7 @@ class DeleteBeneficiaryMutation(
                 else:
                     res = service.delete({'id': obj_id, 'user': user})
                 if not res['success']:
-                    transaction.rollback()
+                    transaction.set_rollback(True)
                     return res
 
     class Input(OpenIMISMutation.Input):
@@ -518,7 +518,7 @@ class DeleteGroupBeneficiaryMutation(
                 else:
                     res = service.delete({'id': obj_id, 'user': user})
                 if not res['success']:
-                    transaction.rollback()
+                    transaction.set_rollback(True)
                     return res
 
     class Input(OpenIMISMutation.Input):
