@@ -15,6 +15,10 @@ DEFAULT_CONFIG = {
     "gql_benefit_plan_update_perms": ["160003"],
     "gql_benefit_plan_delete_perms": ["160004"],
     "gql_benefit_plan_close_perms": ["160005"],
+    "gql_programme_search_perms": ["160001"],
+    "gql_programme_create_perms": ["160002"],
+    "gql_programme_update_perms": ["160003"],
+    "gql_programme_delete_perms": ["160004"],
     "gql_beneficiary_search_perms": ["170001"],
     "gql_beneficiary_create_perms": ["170002"],
     "gql_beneficiary_update_perms": ["170003"],
@@ -81,6 +85,10 @@ class SocialProtectionConfig(AppConfig):
     gql_benefit_plan_update_perms = None
     gql_benefit_plan_delete_perms = None
     gql_benefit_plan_close_perms = None
+    gql_programme_search_perms = None
+    gql_programme_create_perms = None
+    gql_programme_update_perms = None
+    gql_programme_delete_perms = None
     gql_beneficiary_search_perms = None
     gql_beneficiary_create_perms = None
     gql_beneficiary_update_perms = None

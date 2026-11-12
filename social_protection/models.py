@@ -17,6 +17,28 @@ class BeneficiaryStatus(models.TextChoices):
     SUSPENDED = "SUSPENDED", _("SUSPENDED")
 
 
+class Programme(core_models.HistoryBusinessModel):
+    """
+    Umbrella grouping benefit plans. Users see the benefit plans of the
+    programmes they belong to (see `social_protection.programme_scope`).
+    """
+    code = models.CharField(max_length=32, null=False)
+    name = models.CharField(max_length=255, null=False)
+    description = models.CharField(max_length=1024, null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(is_deleted=False),
+                name='social_protection_programme_unique_live_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Programme {self.code}'
+
+
 class BenefitPlan(core_models.HistoryBusinessModel):
     class BenefitPlanType(models.TextChoices):
         INDIVIDUAL_TYPE = "INDIVIDUAL", _("INDIVIDUAL")
@@ -34,9 +56,40 @@ class BenefitPlan(core_models.HistoryBusinessModel):
         max_length=100, choices=BenefitPlanType.choices, default=BenefitPlanType.INDIVIDUAL_TYPE, null=False
     )
     description = models.CharField(max_length=1024, null=True, blank=True)
+    programme = models.ForeignKey(
+        Programme, models.DO_NOTHING, null=True, blank=True, related_name="benefit_plans"
+    )
 
     def __str__(self):
         return f'Benefit Plan {self.code}'
+
+
+class UserProgramme(core_models.HistoryModel):
+    """
+    Membership of a user in a programme. A row is live while `is_deleted` is
+    False; a user has at most one live row per programme and at most one live
+    default programme.
+    """
+    user = models.ForeignKey(core_models.User, models.DO_NOTHING, related_name="+")
+    programme = models.ForeignKey(Programme, models.DO_NOTHING, related_name="user_programmes")
+    is_default = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'programme'],
+                condition=models.Q(is_deleted=False),
+                name='social_protection_userprogramme_unique_live_member',
+            ),
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(is_deleted=False, is_default=True),
+                name='social_protection_userprogramme_unique_live_default',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} in {self.programme_id}'
 
 
 class BenefitPlanMutation(UUIDModel, ObjectMutation):
