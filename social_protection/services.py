@@ -28,8 +28,16 @@ from social_protection.models import (
     GroupBeneficiaryProjectTimeEntry,
     BeneficiaryProjectEnrollment,
     GroupBeneficiaryProjectEnrollment,
+    Programme,
+    UserProgramme,
 )
-
+from social_protection.programme_scope import (
+    assert_benefit_plan_in_scope,
+    assert_benefit_plans_in_scope,
+    forget_programme_scope,
+    is_superuser,
+    write_scope,
+)
 from social_protection.utils import (
     load_dataframe,
     fetch_summary_of_valid_items,
@@ -40,6 +48,7 @@ from social_protection.validation import (
     BenefitPlanValidation,
     GroupBeneficiaryValidation,
     ProjectValidation,
+    ProgrammeValidation,
 )
 from tasks_management.services import (
     UpdateCheckerLogicServiceMixin,
@@ -48,7 +57,7 @@ from tasks_management.services import (
 )
 from workflow.systems.base import WorkflowHandler
 from core.models import User
-from core.services.utils import output_exception
+from core.services.utils import output_exception, output_result_success
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +70,10 @@ class BenefitPlanService(BaseService, UpdateCheckerLogicServiceMixin):
 
     @register_service_signal('benefit_plan_service.create')
     def create(self, obj_data):
-        return super().create(obj_data)
+        result = super().create(obj_data)
+        if obj_data.get('programme_id'):
+            forget_programme_scope(self.user)
+        return result
 
     @register_service_signal('benefit_plan_service.update')
     def update(self, obj_data):
@@ -72,12 +84,32 @@ class BenefitPlanService(BaseService, UpdateCheckerLogicServiceMixin):
         obj_data = {k: v for k, v in obj_data.items() if k != 'user'}
         return super().delete(obj_data)
 
+    @register_service_signal('benefit_plan_service.set_programme')
+    def set_programme(self, obj_data):
+        try:
+            with transaction.atomic():
+                self.validation_class.validate_set_programme(self.user, **obj_data)
+                benefit_plan = BenefitPlan.objects.get(id=obj_data['id'])
+                programme_id = obj_data.get('programme_id')
+                if str(benefit_plan.programme_id) != str(programme_id):
+                    benefit_plan.programme_id = programme_id
+                    benefit_plan.save(user=self.user)
+                    forget_programme_scope(self.user)
+                return output_result_success({'id': str(benefit_plan.id), 'programme_id': str(programme_id)})
+        except Exception as exc:
+            return output_exception(
+                model_name=self.OBJECT_TYPE.__name__,
+                method="set_programme",
+                exception=exc
+            )
+
     @register_service_signal('benefit_plan_service.undo_delete')
     def undo_delete(self, obj_data):
         self.validation_class.validate_undo_delete(obj_data)
         obj_ = self.OBJECT_TYPE.objects.filter(
             id=obj_data['id']
         ).first()
+        assert_benefit_plan_in_scope(self.user, obj_)
         obj_.is_deleted = False
         obj_.save(user=self.user)
         return {
@@ -98,6 +130,7 @@ class BenefitPlanService(BaseService, UpdateCheckerLogicServiceMixin):
         benefit_plan = BenefitPlan.objects.filter(
             id=obj_data.get('id')
         ).first()
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
         data = {'benefit_plan_id': benefit_plan.id}
         TaskService(self.user).create({
             'source': 'BenefitPlanService',
@@ -311,6 +344,16 @@ class ProjectEnrollmentService:
         project = Project.objects.get(id=project_id)
         enrollment_model = self.config['enrollment_model']
         fk_field = self.config['fk_field']
+        if write_scope(self.user) is not None:
+            beneficiary_model = enrollment_model._meta.get_field(
+                fk_field[:-len('_id')]
+            ).related_model
+            assert_benefit_plans_in_scope(self.user, {
+                project.benefit_plan_id,
+                *beneficiary_model.objects.filter(
+                    id__in=beneficiary_ids
+                ).values_list('benefit_plan_id', flat=True),
+            })
 
         # including deleted
         all_enrollments = {
@@ -389,6 +432,18 @@ class ProjectEnrollmentService:
             raise ValueError(
                 _('Invalid enrollment IDs: %(ids)s') % {'ids': invalid_ids}
             )
+        self._assert_entries_belong_to_their_enrollments(
+            time_entry_model, time_entries_data
+        )
+        if write_scope(self.user) is not None:
+            beneficiary_field = self.config['fk_field'][:-len('_id')]
+            assert_benefit_plans_in_scope(self.user, {
+                benefit_plan_id
+                for pair in enrollment_model.objects.filter(id__in=valid_enrollment_ids).values_list(
+                    'project__benefit_plan_id', f'{beneficiary_field}__benefit_plan_id'
+                )
+                for benefit_plan_id in pair
+            })
 
         for entry in time_entries_data:
             enrollment = enrollment_map[str(entry['enrollment_id'])]
@@ -411,6 +466,46 @@ class ProjectEnrollmentService:
             data_list=time_entries_data,
             user=self.user
         )
+
+    @staticmethod
+    def _assert_entries_belong_to_their_enrollments(time_entry_model, time_entries_data):
+        """An entry given with an existing id keeps its enrollment: it is updated only through that enrollment."""
+        requested = {
+            str(entry['id']): str(entry['enrollment_id'])
+            for entry in time_entries_data if entry.get('id')
+        }
+        if not requested:
+            return
+        existing = time_entry_model.objects.filter(
+            id__in=requested.keys()
+        ).values_list('id', 'enrollment_id')
+        foreign = {
+            str(entry_id) for entry_id, enrollment_id in existing
+            if str(enrollment_id) != requested[str(entry_id)]
+        }
+        if foreign:
+            raise ValueError(
+                _('Time entries %(ids)s belong to another enrollment')
+                % {'ids': sorted(foreign)}
+            )
+
+
+UPLOAD_NOT_IN_BENEFIT_PLAN_MESSAGE = "social_protection.validation.upload_not_in_benefit_plan"
+
+
+def assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan):
+    """Refuses an upload that no live upload record links to `benefit_plan` (instance or id)."""
+    benefit_plan_id = getattr(benefit_plan, 'id', benefit_plan)
+    try:
+        linked = BenefitPlanDataUploadRecords.objects.filter(
+            data_upload_id=upload_id,
+            benefit_plan_id=benefit_plan_id,
+            is_deleted=False,
+        ).exists()
+    except (ValidationError, ValueError):
+        linked = False
+    if not linked:
+        raise ValueError(UPLOAD_NOT_IN_BENEFIT_PLAN_MESSAGE)
 
 
 class BeneficiaryImportService:
@@ -437,6 +532,7 @@ class BeneficiaryImportService:
         workflow: WorkflowHandler,
         group_aggregation_column: str
     ):
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
         upload = self._save_sources(import_file)
         self._create_benefit_plan_data_upload_records(
             benefit_plan, workflow, upload, group_aggregation_column
@@ -469,6 +565,8 @@ class BeneficiaryImportService:
     def validate_import_beneficiaries(
         self, upload_id: uuid, individual_sources, benefit_plan: BenefitPlan
     ):
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         dataframe = self._load_dataframe(individual_sources)
         validated_dataframe, invalid_items = (
             self._validate_possible_beneficiaries(
@@ -486,6 +584,8 @@ class BeneficiaryImportService:
     def create_task_with_importing_valid_items(
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         if SocialProtectionConfig.enable_maker_checker_for_beneficiary_upload:
             BeneficiaryTaskCreatorService(self.user) \
                 .create_task_with_importing_valid_items(
@@ -511,6 +611,8 @@ class BeneficiaryImportService:
     def create_task_with_update_valid_items(
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         mc_enabled = (
             SocialProtectionConfig.enable_maker_checker_for_beneficiary_update
         )
@@ -541,6 +643,8 @@ class BeneficiaryImportService:
     def synchronize_data_for_reporting(
         self, upload_id: uuid, benefit_plan: BenefitPlan
     ):
+        assert_benefit_plan_in_scope(self.user, benefit_plan)
+        assert_upload_belongs_to_benefit_plan(upload_id, benefit_plan)
         self._synchronize_individual(upload_id)
         self._synchronize_beneficiary(benefit_plan, upload_id)
 
@@ -905,6 +1009,7 @@ class ProjectService(BaseService):
         obj_ = self.OBJECT_TYPE.objects.filter(
             id=obj_data['id']
         ).first()
+        assert_benefit_plan_in_scope(self.user, obj_.benefit_plan_id)
         obj_.is_deleted = False
         obj_.save(user=self.user)
         return {
@@ -912,3 +1017,125 @@ class ProjectService(BaseService):
             "message": "Ok",
             "detail": "Undo Delete",
         }
+
+
+class ProgrammeService(BaseService):
+    OBJECT_TYPE = Programme
+
+    def __init__(self, user, validation_class=ProgrammeValidation):
+        super().__init__(user, validation_class)
+
+    @register_service_signal('programme_service.create')
+    def create(self, obj_data):
+        """Creates the programme; a creator who is not a superuser becomes its member."""
+        try:
+            with transaction.atomic():
+                result = super().create(obj_data)
+                if result.get('success') and not is_superuser(self.user):
+                    UserProgramme(
+                        user_id=self.user.id,
+                        programme_id=result['data']['id'],
+                    ).save(user=self.user)
+                    forget_programme_scope(self.user)
+                return result
+        except Exception as exc:
+            return output_exception(
+                model_name=self.OBJECT_TYPE.__name__,
+                method="create",
+                exception=exc
+            )
+
+    @register_service_signal('programme_service.update')
+    def update(self, obj_data):
+        return super().update(obj_data)
+
+    @register_service_signal('programme_service.delete')
+    def delete(self, obj_data):
+        return super().delete(obj_data)
+
+    @register_service_signal('programme_service.add_members')
+    def add_members(self, obj_data):
+        try:
+            with transaction.atomic():
+                programme_id = obj_data.get('programme_id')
+                self.validation_class.validate_members(self.user, programme_id)
+                user_ids = self._resolve_user_ids(obj_data.get('user_ids'))
+                already_members = set(UserProgramme.objects.filter(
+                    programme_id=programme_id,
+                    user_id__in=user_ids,
+                    is_deleted=False,
+                ).values_list('user_id', flat=True))
+                added = user_ids - already_members
+                for user_id in added:
+                    UserProgramme(
+                        user_id=user_id, programme_id=programme_id
+                    ).save(user=self.user)
+                forget_programme_scope(self.user)
+                return output_result_success({'added': len(added)})
+        except Exception as exc:
+            return output_exception(
+                model_name=UserProgramme.__name__,
+                method="add_members",
+                exception=exc
+            )
+
+    @register_service_signal('programme_service.remove_members')
+    def remove_members(self, obj_data):
+        try:
+            with transaction.atomic():
+                programme_id = obj_data.get('programme_id')
+                self.validation_class.validate_members(self.user, programme_id)
+                user_ids = self._resolve_user_ids(obj_data.get('user_ids'))
+                memberships = list(UserProgramme.objects.filter(
+                    programme_id=programme_id,
+                    user_id__in=user_ids,
+                    is_deleted=False,
+                ))
+                for membership in memberships:
+                    membership.delete(user=self.user)
+                forget_programme_scope(self.user)
+                return output_result_success({'removed': len(memberships)})
+        except Exception as exc:
+            return output_exception(
+                model_name=UserProgramme.__name__,
+                method="remove_members",
+                exception=exc
+            )
+
+    @register_service_signal('programme_service.set_default')
+    def set_default(self, obj_data):
+        """Makes `programme_id` the default programme of the acting user, who must be a member."""
+        try:
+            with transaction.atomic():
+                programme_id = obj_data.get('programme_id')
+                self.validation_class.validate_set_default(self.user, programme_id)
+                memberships = UserProgramme.objects.filter(
+                    user_id=self.user.id, is_deleted=False
+                )
+                for previous in memberships.filter(is_default=True).exclude(programme_id=programme_id):
+                    previous.is_default = False
+                    previous.save(user=self.user)
+                membership = memberships.get(programme_id=programme_id)
+                if not membership.is_default:
+                    membership.is_default = True
+                    membership.save(user=self.user)
+                return output_result_success({'programme_id': str(programme_id)})
+        except Exception as exc:
+            return output_exception(
+                model_name=UserProgramme.__name__,
+                method="set_default",
+                exception=exc
+            )
+
+    @staticmethod
+    def _resolve_user_ids(user_ids):
+        requested = {uuid.UUID(str(user_id)) for user_id in user_ids or []}
+        if not requested:
+            raise ValidationError(_("social_protection.programme.no_users"))
+        found = set(User.objects.filter(id__in=requested).values_list('id', flat=True))
+        if requested - found:
+            raise ValidationError(
+                _("social_protection.programme.unknown_users")
+                + ": " + ", ".join(sorted(str(u) for u in requested - found))
+            )
+        return requested

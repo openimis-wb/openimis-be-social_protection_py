@@ -13,12 +13,13 @@ from social_protection.apps import SocialProtectionConfig
 from social_protection.models import (
     BenefitPlan, Project, ProjectMutation, Activity,
     Beneficiary, GroupBeneficiary, BeneficiaryStatus, BenefitPlanMutation,
-    BeneficiaryProjectTimeEntry, GroupBeneficiaryProjectTimeEntry
+    BeneficiaryProjectTimeEntry, GroupBeneficiaryProjectTimeEntry,
+    Programme, UserProgramme,
 )
 from social_protection.services import (
     BenefitPlanService, ProjectService,
     BeneficiaryService, GroupBeneficiaryService,
-    ProjectEnrollmentService
+    ProjectEnrollmentService, ProgrammeService,
 )
 from location.models import Location
 
@@ -135,7 +136,7 @@ class CreateBenefitPlanMutation(
         return None
 
     class Input(CreateBenefitPlanInputType):
-        pass
+        programme_id = graphene.UUID(required=False)
 
 
 class UpdateBenefitPlanMutation(
@@ -181,6 +182,33 @@ class UpdateBenefitPlanMutation(
 
     class Input(UpdateBenefitPlanInputType):
         pass
+
+
+class SetBenefitPlanProgrammeMutation(BaseMutation):
+    """
+    Attaches an existing benefit plan to a programme, moves it, or detaches it
+    when `programme_id` is omitted. Superusers only; applied without a task.
+    """
+    _mutation_class = "SetBenefitPlanProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = BenefitPlan
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        if type(user) is AnonymousUser or not user.id:
+            raise ValidationError("mutation.authentication_required")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = BenefitPlanService(user).set_programme({
+            'id': data.get('id'),
+            'programme_id': data.get('programme_id'),
+        })
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True)
+        programme_id = graphene.UUID(required=False)
 
 
 class DeleteBenefitPlanMutation(
@@ -835,3 +863,156 @@ class BulkUpdateGroupBeneficiaryTimeEntriesMutation(BaseMutation):
 
     class Input(OpenIMISMutation.Input):
         time_entries = graphene.List(TimeEntryInputType, required=True)
+
+
+def _pop_client_mutation_fields(data):
+    data.pop('client_mutation_id', None)
+    data.pop('client_mutation_label', None)
+    return data
+
+
+def _check_programme_rights(user, action):
+    rights = Programme.get_rights(action)
+    if type(user) is AnonymousUser or not user.id or not rights or not user.has_perms(rights):
+        raise ValidationError("mutation.authentication_required")
+
+
+class CreateProgrammeMutation(
+    BaseHistoryModelCreateMutationMixin, BaseMutation
+):
+    _mutation_class = "CreateProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = Programme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _check_programme_rights(user, "create")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = ProgrammeService(user).create(_pop_client_mutation_fields(data))
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        code = graphene.String(required=True, max_length=32)
+        name = graphene.String(required=True, max_length=255)
+        description = graphene.String(required=False, max_length=1024)
+
+
+class UpdateProgrammeMutation(
+    BaseHistoryModelUpdateMutationMixin, BaseMutation
+):
+    _mutation_class = "UpdateProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = Programme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _check_programme_rights(user, "update")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = ProgrammeService(user).update(_pop_client_mutation_fields(data))
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True)
+        code = graphene.String(required=False, max_length=32)
+        name = graphene.String(required=False, max_length=255)
+        description = graphene.String(required=False, max_length=1024)
+
+
+class DeleteProgrammeMutation(
+    BaseHistoryModelDeleteMutationMixin, BaseMutation
+):
+    _mutation_class = "DeleteProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = Programme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _check_programme_rights(user, "delete")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        _pop_client_mutation_fields(data)
+        ids = data.get('ids')
+        if not ids:
+            return {
+                'success': False, 'message': 'No IDs to delete', 'details': ''
+            }
+        service = ProgrammeService(user)
+        with transaction.atomic():
+            for obj_id in ids:
+                res = service.delete({'id': obj_id})
+                if not res['success']:
+                    transaction.set_rollback(True)
+                    return res
+
+    class Input(OpenIMISMutation.Input):
+        ids = graphene.List(graphene.UUID)
+
+
+class AddProgrammeMembersMutation(BaseMutation):
+    _mutation_class = "AddProgrammeMembersMutation"
+    _mutation_module = "social_protection"
+    _model = UserProgramme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _check_programme_rights(user, "update")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = ProgrammeService(user).add_members({
+            'programme_id': data.get('programme_id'),
+            'user_ids': data.get('user_ids'),
+        })
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        programme_id = graphene.UUID(required=True)
+        user_ids = graphene.List(graphene.UUID, required=True)
+
+
+class RemoveProgrammeMembersMutation(BaseMutation):
+    _mutation_class = "RemoveProgrammeMembersMutation"
+    _mutation_module = "social_protection"
+    _model = UserProgramme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _check_programme_rights(user, "update")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = ProgrammeService(user).remove_members({
+            'programme_id': data.get('programme_id'),
+            'user_ids': data.get('user_ids'),
+        })
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        programme_id = graphene.UUID(required=True)
+        user_ids = graphene.List(graphene.UUID, required=True)
+
+
+class SetMyDefaultProgrammeMutation(BaseMutation):
+    _mutation_class = "SetMyDefaultProgrammeMutation"
+    _mutation_module = "social_protection"
+    _model = UserProgramme
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        if type(user) is AnonymousUser or not user.id:
+            raise ValidationError("mutation.authentication_required")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        res = ProgrammeService(user).set_default({
+            'programme_id': data.get('programme_id'),
+        })
+        return res if not res['success'] else None
+
+    class Input(OpenIMISMutation.Input):
+        programme_id = graphene.UUID(required=True)

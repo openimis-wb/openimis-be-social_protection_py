@@ -8,6 +8,7 @@ from core import models as core_models
 from core.models import UUIDModel, ObjectMutation, MutationLog
 from individual.models import Individual, Group, IndividualDataSourceUpload
 from location.models import Location
+from social_protection import programme_scope
 
 
 class BeneficiaryStatus(models.TextChoices):
@@ -15,6 +16,45 @@ class BeneficiaryStatus(models.TextChoices):
     ACTIVE = "ACTIVE", _("ACTIVE")
     GRADUATED = "GRADUATED", _("GRADUATED")
     SUSPENDED = "SUSPENDED", _("SUSPENDED")
+
+
+class Programme(core_models.HistoryBusinessModel):
+    """
+    Umbrella grouping benefit plans. Users see the benefit plans of the
+    programmes they belong to (see `social_protection.programme_scope`).
+    """
+    @classmethod
+    def get_rights(cls, action):
+        """
+        Programmes are administered with the benefit plan rights (160001-160004):
+        the catalogue holds no identifier of their own. "close" does not apply.
+        """
+        from social_protection.apps import configured_perms
+
+        if action not in ("query", "create", "update", "delete"):
+            return None
+        return configured_perms("benefitPlan", action)
+
+    code = models.CharField(max_length=32, null=False)
+    name = models.CharField(max_length=255, null=False)
+    description = models.CharField(max_length=1024, null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(is_deleted=False),
+                name='social_protection_programme_unique_live_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Programme {self.code}'
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.scope_programmes(queryset, cls.scoping_user(user))
 
 
 class BenefitPlan(core_models.HistoryBusinessModel):
@@ -53,9 +93,65 @@ class BenefitPlan(core_models.HistoryBusinessModel):
         max_length=100, choices=BenefitPlanType.choices, default=BenefitPlanType.INDIVIDUAL_TYPE, null=False
     )
     description = models.CharField(max_length=1024, null=True, blank=True)
+    programme = models.ForeignKey(
+        Programme, models.DO_NOTHING, null=True, blank=True, related_name="benefit_plans"
+    )
+
+    # Paths from this model to the benefit plans that decide its programme scope.
+    programme_scope_paths = ("",)
 
     def __str__(self):
         return f'Benefit Plan {self.code}'
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
+
+
+class UserProgramme(core_models.HistoryModel):
+    """
+    Membership of a user in a programme. A row is live while `is_deleted` is
+    False; a user has at most one live row per programme and at most one live
+    default programme.
+    """
+    user = models.ForeignKey(core_models.User, models.DO_NOTHING, related_name="+")
+    programme = models.ForeignKey(Programme, models.DO_NOTHING, related_name="user_programmes")
+    is_default = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'programme'],
+                condition=models.Q(is_deleted=False),
+                name='social_protection_userprogramme_unique_live_member',
+            ),
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(is_deleted=False, is_default=True),
+                name='social_protection_userprogramme_unique_live_default',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} in {self.programme_id}'
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        """
+        The user's own live memberships of live programmes; with the right to
+        update programmes, also the live memberships of the user's programmes.
+        """
+        queryset = super().get_queryset(queryset, user)
+        user = cls.scoping_user(user)
+        rights = Programme.get_rights("update")
+        include_co_members = bool(
+            rights and getattr(user, "id", None) and getattr(user, "is_authenticated", False)
+            and user.has_perms(rights)
+        )
+        return programme_scope.scope_memberships(queryset, user, include_co_members)
 
 
 class BenefitPlanMutation(UUIDModel, ObjectMutation):
@@ -112,6 +208,15 @@ class Project(core_models.HistoryBusinessModel):
     working_days = models.SmallIntegerField(null=False)
     allows_multiple_enrollments = models.BooleanField(default=False)
 
+    programme_scope_paths = ("benefit_plan",)
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
+
 
 class ProjectMutation(UUIDModel, ObjectMutation):
     project = models.ForeignKey(Project, models.DO_NOTHING, related_name='mutations')
@@ -148,10 +253,19 @@ class BeneficiaryProjectEnrollment(core_models.HistoryBusinessModel):
         null=False,
     )
 
+    programme_scope_paths = ("project__benefit_plan", "beneficiary__benefit_plan")
+
     class Meta:
         unique_together = ('beneficiary', 'project')
         verbose_name = _("Beneficiary Project Enrollment")
         verbose_name_plural = _("Beneficiary Project Enrollments")
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
     def clean(self):
         if self.beneficiary.status != BeneficiaryStatus.ACTIVE:
@@ -190,10 +304,19 @@ class GroupBeneficiaryProjectEnrollment(core_models.HistoryBusinessModel):
         null=False,
     )
 
+    programme_scope_paths = ("project__benefit_plan", "group_beneficiary__benefit_plan")
+
     class Meta:
         unique_together = ('group_beneficiary', 'project')
         verbose_name = _("Group Beneficiary Project Enrollment")
         verbose_name_plural = _("Group Beneficiary Project Enrollments")
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
     def clean(self):
         if self.group_beneficiary.status != BeneficiaryStatus.ACTIVE:
@@ -227,6 +350,8 @@ class Beneficiary(core_models.HistoryBusinessModel):
 
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
 
+    programme_scope_paths = ("benefit_plan",)
+
     def clean(self):
         if self.benefit_plan.type != BenefitPlan.BenefitPlanType.INDIVIDUAL_TYPE:
             raise ValidationError(_("Beneficiary must be associated with an individual benefit plan."))
@@ -245,7 +370,10 @@ class Beneficiary(core_models.HistoryBusinessModel):
         ).distinct()
 
         individual_queryset = Individual.get_queryset(individuals, user)
-        return queryset.filter(individual__in=individual_queryset)
+        queryset = queryset.filter(individual__in=individual_queryset)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
 
 class AbstractProjectTimeEntry(core_models.HistoryBusinessModel):
@@ -307,10 +435,19 @@ class BeneficiaryProjectTimeEntry(AbstractProjectTimeEntry):
         null=False,
     )
 
+    programme_scope_paths = ("enrollment__project__benefit_plan", "enrollment__beneficiary__benefit_plan")
+
     class Meta:
         unique_together = ('enrollment', 'day_number')
         verbose_name = _("Beneficiary Project Time Entry")
         verbose_name_plural = _("Beneficiary Project Time Entries")
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
     def _get_enrollment_instance(self):
         return self.enrollment
@@ -324,10 +461,19 @@ class GroupBeneficiaryProjectTimeEntry(AbstractProjectTimeEntry):
         null=False,
     )
 
+    programme_scope_paths = ("enrollment__project__benefit_plan", "enrollment__group_beneficiary__benefit_plan")
+
     class Meta:
         unique_together = ('enrollment', 'day_number')
         verbose_name = _("Group Beneficiary Project Time Entry")
         verbose_name_plural = _("Group Beneficiary Project Time Entries")
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
     def _get_enrollment_instance(self):
         return self.enrollment
@@ -343,8 +489,17 @@ class BenefitPlanDataUploadRecords(core_models.HistoryModel):
     benefit_plan = models.ForeignKey(BenefitPlan, models.DO_NOTHING, null=False)
     workflow = models.CharField(max_length=50)
 
+    programme_scope_paths = ("benefit_plan",)
+
     def __str__(self):
         return f"{self.benefit_plan.code} {self.data_upload.source_name} {self.workflow} {self.date_created}"
+
+    @classmethod
+    def get_queryset(cls, queryset, user=None):
+        queryset = super().get_queryset(queryset, user)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
 
 class GroupBeneficiary(core_models.HistoryBusinessModel):
@@ -371,6 +526,8 @@ class GroupBeneficiary(core_models.HistoryBusinessModel):
 
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
 
+    programme_scope_paths = ("benefit_plan",)
+
     def clean(self):
         if self.benefit_plan.type != BenefitPlan.BenefitPlanType.GROUP_TYPE:
             raise ValidationError(_("Group beneficiary must be associated with a benefit plan type = GROUP."))
@@ -386,7 +543,10 @@ class GroupBeneficiary(core_models.HistoryBusinessModel):
         ).distinct()
 
         group_queryset = Group.get_queryset(groups, user)
-        return queryset.filter(group__in=group_queryset)
+        queryset = queryset.filter(group__in=group_queryset)
+        return programme_scope.filter_by_programme(
+            queryset, cls.scoping_user(user), cls.programme_scope_paths
+        )
 
 
 class JSONUpdate(Func):

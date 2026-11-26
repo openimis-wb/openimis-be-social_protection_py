@@ -4,6 +4,7 @@ import pandas as pd
 import mimetypes
 import os
 
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.http import StreamingHttpResponse
 from django.utils.translation import gettext as _
@@ -16,7 +17,8 @@ from core.views import check_user_rights
 from individual.apps import IndividualConfig
 from individual.models import IndividualDataSource
 from social_protection.apps import SocialProtectionConfig
-from social_protection.models import BenefitPlan
+from social_protection.models import BenefitPlan, BenefitPlanDataUploadRecords
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from social_protection.services import BeneficiaryImportService
 from workflow.services import WorkflowService
 
@@ -70,6 +72,35 @@ def is_valid_file(import_file):
     return True, None
 
 
+def _forbidden(exc):
+    return Response(
+        {'success': False, 'error': str(exc)},
+        status=status.HTTP_403_FORBIDDEN
+    )
+
+
+def _not_found(message):
+    return Response(
+        {'success': False, 'error': message},
+        status=status.HTTP_404_NOT_FOUND
+    )
+
+
+def _find_benefit_plan(benefit_plan_id, **filters):
+    """The benefit plan with `benefit_plan_id`, or None for a missing or malformed id."""
+    try:
+        return BenefitPlan.objects.filter(id=benefit_plan_id, **filters).first()
+    except (ValidationError, ValueError):
+        return None
+
+
+def _is_plain_file_name(filename):
+    """A bare file name: no directory part and no parent reference."""
+    if not filename or filename in ('.', '..') or '\\' in filename:
+        return False
+    return os.path.basename(filename) == filename
+
+
 def get_global_schema_fields(benefit_plan):
     schema = (
         benefit_plan.beneficiary_data_schema
@@ -89,9 +120,15 @@ def get_global_schema_fields(benefit_plan):
 )])
 def download_template_benefit_plan_file(request):
     benefit_plan_uuid = request.GET.get('benefit_plan_uuid')
-    benefit_plan = BenefitPlan.objects.filter(
-        id=benefit_plan_uuid, is_deleted=False
-    ).first()
+    benefit_plan = None
+    if benefit_plan_uuid:
+        benefit_plan = _find_benefit_plan(benefit_plan_uuid, is_deleted=False)
+        if benefit_plan is None:
+            return _not_found(_('Benefit plan not found'))
+        try:
+            assert_benefit_plan_in_scope(request.user, benefit_plan, request)
+        except PermissionDenied as exc:
+            return _forbidden(exc)
     try:
         base_fields = SocialProtectionConfig.beneficiary_base_fields
         extra_fields = get_global_schema_fields(benefit_plan)
@@ -158,6 +195,8 @@ def import_beneficiaries(request):
             {'success': False, 'error': str(e)},
             status=status.HTTP_400_BAD_REQUEST
         )
+    except PermissionDenied as e:
+        return _forbidden(e)
     except FileExistsError as e:
         logger.error("Error while saving file", exc_info=e)
         return Response(
@@ -196,6 +235,8 @@ def validate_import_beneficiaries(request):
 
         # for now just return info if df valid
         return Response(result)
+    except PermissionDenied as e:
+        return _forbidden(e)
     except ValueError as e:
         logger.error("Error while validating individuals", exc_info=e)
         return Response(
@@ -225,6 +266,8 @@ def create_task_with_importing_valid_items(request):
             benefit_plan
         )
         return Response({'success': True, 'error': None}, status=201)
+    except PermissionDenied as exc:
+        return _forbidden(exc)
     except ValueError as exc:
         logger.error(
             "Error while sending callback to openIMIS", exc_info=exc
@@ -249,6 +292,10 @@ def create_task_with_importing_valid_items(request):
 def download_invalid_items(request):
     try:
         upload_id = request.query_params.get('upload_id')
+        for benefit_plan_id in BenefitPlanDataUploadRecords.objects.filter(
+            data_upload_id=upload_id
+        ).values_list('benefit_plan_id', flat=True):
+            assert_benefit_plan_in_scope(request.user, benefit_plan_id, request)
 
         invalid_items = IndividualDataSource.objects.filter(
             Q(is_deleted=False)
@@ -279,6 +326,8 @@ def download_invalid_items(request):
         )
         return response
 
+    except PermissionDenied as exc:
+        return _forbidden(exc)
     except ValueError as exc:
         # Handle errors gracefully
         logger.error("Error while fetching data", exc_info=exc)
@@ -294,16 +343,26 @@ def download_invalid_items(request):
 )])
 def download_beneficiary_upload(request):
     try:
-        benefit_plan_id = request.query_params.get('benefit_plan_id')
+        benefit_plan = _find_benefit_plan(request.query_params.get('benefit_plan_id'))
+        if benefit_plan is None:
+            return _not_found(_('Benefit plan not found'))
+        assert_benefit_plan_in_scope(request.user, benefit_plan, request)
         filename = request.query_params.get('filename')
+        if not _is_plain_file_name(filename):
+            return Response(
+                {'success': False, 'error': _('Invalid file name')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         target_file_path = (
             SocialProtectionConfig.get_beneficiary_upload_file_path(
-                benefit_plan_id, filename
+                benefit_plan.id, filename
             )
         )
         file_handler = DefaultStorageFileHandler(target_file_path)
         return file_handler.get_file_response_csv(filename)
 
+    except PermissionDenied as exc:
+        return _forbidden(exc)
     except ValueError as exc:
         logger.error("Error while fetching data", exc_info=exc)
         return Response(
@@ -338,6 +397,8 @@ def synchronize_data_for_reporting(request):
             benefit_plan
         )
         return Response({'success': True, 'error': None}, status=201)
+    except PermissionDenied as exc:
+        return _forbidden(exc)
     except ValueError as exc:
         logger.error(
             "Error while sending callback to openIMIS", exc_info=exc
@@ -375,6 +436,7 @@ def _resolve_import_beneficiaries_args(request):
         raise ValueError(
             'Benefit Plan not found: {}'.format(benefit_plan_uuid)
         )
+    assert_benefit_plan_in_scope(request.user, benefit_plan, request)
     if (group_aggregation_column
             and benefit_plan.type != BenefitPlan.BenefitPlanType.GROUP_TYPE):
         raise ValueError(
@@ -421,6 +483,7 @@ def _resolve_validate_import_beneficiaries_args(request):
         raise ValueError(
             'Benefit Plan not found: {}'.format(benefit_plan_uuid)
         )
+    assert_benefit_plan_in_scope(request.user, benefit_plan, request)
 
     return upload_id, individual_sources, benefit_plan
 
@@ -437,6 +500,7 @@ def _resolve_create_task_with_importing_valid_items(request):
         raise ValueError(
             'Benefit Plan not found: {}'.format(benefit_plan_uuid)
         )
+    assert_benefit_plan_in_scope(request.user, benefit_plan, request)
 
     return upload_id, benefit_plan
 
@@ -453,6 +517,7 @@ def _resolve_synchronize_data_for_reporting(request):
         raise ValueError(
             'Benefit Plan not found: {}'.format(benefit_plan_uuid)
         )
+    assert_benefit_plan_in_scope(request.user, benefit_plan, request)
 
     return upload_id, benefit_plan
 

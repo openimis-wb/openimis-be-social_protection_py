@@ -25,6 +25,7 @@ from social_protection.models import (
     BenefitPlan,
     GroupBeneficiary
 )
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from tasks_management.apps import TasksManagementConfig
 from tasks_management.models import Task
 from tasks_management.services import TaskService
@@ -327,6 +328,12 @@ def on_task_complete_action(business_event, **kwargs):
     try:
         upload_record = BenefitPlanDataUploadRecords.objects.get(id=task['entity_id'])
         completion_user = User.objects.get(id=data['user']['id'])
+        assert_benefit_plan_in_scope(completion_user, upload_record.benefit_plan_id)
+        if business_event in (
+            SocialProtectionConfig.validation_enrollment,
+            SocialProtectionConfig.validation_group_enrollment,
+        ):
+            assert_benefit_plan_in_scope(completion_user, data['task']['json_ext']['benefit_plan_id'])
 
         # A task that followed an approval flow accumulated its per-record
         # verdicts across every step. accepted=None below means "no filter,
@@ -505,7 +512,9 @@ def on_task_complete_action(business_event, **kwargs):
             data_upload.error = {"Task Resolve": str(exc)}
             # Todo: this should be changed to system user
             data_upload.save(username=data_upload.user_updated.username)
-        logger.error(f"Error while executing on_task_complete_action for {business_event}", exc_info=exc)
+        logger.error(
+            "Task %s (%s) was not applied: %s", task.get('id'), business_event, exc, exc_info=exc
+        )
 
 
 def _enrolment_sources(upload_id, accepted_ids):
@@ -534,13 +543,16 @@ def on_task_complete_import_validated(**kwargs):
     on_task_complete_action(SocialProtectionConfig.validation_import_group_valid_items, **kwargs)
 
 
-def _delete_rejected(uuids_list, task_source):
+def _delete_rejected(uuids_list, task_source, upload_id):
     # Use soft delete to remove atomic tasks, it's not possible to mark them on level of Individual.
+    # Only sources of the task's own upload are rejected.
+    if upload_id is None:
+        return
     model = IndividualDataSource
     if task_source == 'import_group_valid_items':
         model = GroupDataSource
 
-    sources_to_update = model.objects.filter(id__in=uuids_list)
+    sources_to_update = model.objects.filter(id__in=uuids_list, upload_id=upload_id)
 
     # Set is_deleted to True for each instance
     for source in sources_to_update:
@@ -556,6 +568,7 @@ def _complete_task_for_accepted(_task, accept, user):
 
     if not upload_record:
         return
+    assert_benefit_plan_in_scope(user, upload_record.benefit_plan_id)
 
     if _task.business_event == SocialProtectionConfig.validation_import_valid_items:
         IndividualItemsImportTaskCompletionEvent(
@@ -584,6 +597,9 @@ def _complete_task_for_accepted(_task, accept, user):
 
 
 def _resolve_task_any(_task: Task, _user):
+    upload_record = BenefitPlanDataUploadRecords.objects.filter(id=_task.entity_id).first()
+    if upload_record:
+        assert_benefit_plan_in_scope(_user, upload_record.benefit_plan_id)
     # Atomic resolution of beneficiaries
     user_id_str = str(_user.id)
     if isinstance(_task.business_status.get(user_id_str), dict):
@@ -598,7 +614,7 @@ def _resolve_task_any(_task: Task, _user):
             accept = _task.business_status[user_id_str].get('ACCEPT', [])
             reject = _task.business_status[user_id_str].get('REJECT', [])
 
-        _delete_rejected(reject, _task.source)
+        _delete_rejected(reject, _task.source, upload_record.data_upload_id if upload_record else None)
         _complete_task_for_accepted(_task, accept, _user)
 
 
@@ -660,5 +676,6 @@ def on_task_resolve(**kwargs):
 
             resolvers[task.task_group.completion_policy](task, user)
     except Exception as e:
-        logger.error("Error while executing on_task_resolve", exc_info=e)
+        task_id = (((kwargs.get('result') or {}).get('data') or {}).get('task') or {}).get('id')
+        logger.error("Task %s was not resolved: %s", task_id, e, exc_info=e)
         return [str(e)]

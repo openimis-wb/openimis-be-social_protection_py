@@ -13,6 +13,7 @@ from social_protection.models import (
     BenefitPlan,
     GroupBeneficiary
 )
+from social_protection.programme_scope import assert_benefit_plan_in_scope
 from social_protection.utils import calculate_percentage_of_invalid_items
 from tasks_management.models import Task
 from tasks_management.apps import TasksManagementConfig
@@ -29,6 +30,7 @@ def on_confirm_enrollment_of_group(**kwargs):
     benefit_plan_id = result['benefit_plan_id']
     status = result['status']
     user = result['user']
+    assert_benefit_plan_in_scope(user, benefit_plan_id)
     groups_to_upload = result['groups_not_assigned_to_selected_programme']
     group_ids = groups_to_upload.values_list('id', flat=True)
     if SocialProtectionConfig.enable_maker_checker_logic_enrollment:

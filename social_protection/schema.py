@@ -21,6 +21,7 @@ from social_protection.gql_mutations import (
     DeleteBenefitPlanMutation,
     UndoDeleteBenefitPlanMutation,
     CloseBenefitPlanMutation,
+    SetBenefitPlanProgrammeMutation,
     CreateBeneficiaryMutation,
     UpdateBeneficiaryMutation,
     DeleteBeneficiaryMutation,
@@ -35,6 +36,12 @@ from social_protection.gql_mutations import (
     ProjectGroupEnrollmentMutation,
     BulkUpdateBeneficiaryTimeEntriesMutation,
     BulkUpdateGroupBeneficiaryTimeEntriesMutation,
+    CreateProgrammeMutation,
+    UpdateProgrammeMutation,
+    DeleteProgrammeMutation,
+    AddProgrammeMembersMutation,
+    RemoveProgrammeMembersMutation,
+    SetMyDefaultProgrammeMutation,
 )
 from social_protection.gql_queries import (
     BenefitPlanGQLType,
@@ -43,6 +50,8 @@ from social_protection.gql_queries import (
     BenefitPlanHistoryGQLType,
     ActivityGQLType, ProjectGQLType,
     ProjectHistoryGQLType,
+    ProgrammeGQLType,
+    UserProgrammeGQLType,
 )
 from social_protection.export_mixin import ExportableSocialProtectionQueryMixin
 from social_protection.models import (
@@ -52,7 +61,10 @@ from social_protection.models import (
     BenefitPlanDataUploadRecords,
     Activity,
     Project,
+    Programme,
+    UserProgramme,
 )
+from social_protection.programme_scope import assert_can_manage_programme
 from social_protection.validation import (
     validate_bf_unique_code,
     validate_bf_unique_name,
@@ -202,6 +214,22 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
         client_mutation_id=graphene.String(),
         search=graphene.String(),
         sort_alphabetically=graphene.Boolean(),
+    )
+
+    programme = OrderedDjangoFilterConnectionField(
+        ProgrammeGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        description="Programmes: all for superusers, the user's own otherwise"
+    )
+    my_programmes = graphene.List(
+        UserProgrammeGQLType,
+        description="Live memberships of the current user; ignores the X-Programme header"
+    )
+    programme_members = OrderedDjangoFilterConnectionField(
+        UserProgrammeGQLType,
+        programme_id=graphene.UUID(required=True),
+        orderBy=graphene.List(of_type=graphene.String),
+        description="Live members of a programme"
     )
 
     def resolve_bf_code_validity(self, info, **kwargs):
@@ -377,7 +405,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
                 Query._get_location_filters_v2(location_id, 'individual')
             )
 
-        query = Beneficiary.get_queryset(None, info.context.user)
+        query = Beneficiary.objects.all()
         query = _apply_custom_filters(query.filter(*filters), **kwargs)
 
         eligible_uuids, check_performed = _get_eligible_uuids(
@@ -474,7 +502,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
                 Query._get_location_filters_v2(location_id, 'group')
             )
 
-        query = GroupBeneficiary.get_queryset(None, info.context.user)
+        query = GroupBeneficiary.objects.all()
         query = _apply_custom_filters(query.filter(*filters), **kwargs)
 
         eligible_group_uuids, check_performed = _get_eligible_group_uuids(
@@ -548,7 +576,7 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
         if bf_type:
             filters.append(Q(type=bf_type))
 
-        query = BenefitPlan.objects.filter(*filters)
+        query = BenefitPlanGQLType.get_queryset(BenefitPlan.objects.filter(*filters), info)
         return gql_optimizer.query(query, info)
 
     @staticmethod
@@ -702,6 +730,30 @@ class Query(ExportableSocialProtectionQueryMixin, graphene.ObjectType):
             query = query.order_by('name')
         return gql_optimizer.query(query, info)
 
+    def resolve_programme(self, info, **kwargs):
+        Query._check_permissions(info.context.user, Programme.get_rights("query"))
+        query = Programme.objects.order_by("code")
+        return gql_optimizer.query(query, info)
+
+    def resolve_my_programmes(self, info, **kwargs):
+        user = info.context.user
+        if type(user) is AnonymousUser or not user.id:
+            raise PermissionError("Unauthorized")
+        query = UserProgramme.objects.filter(
+            user_id=user.id, is_deleted=False, programme__is_deleted=False,
+        ).select_related("programme").order_by("programme__code")
+        return UserProgrammeGQLType.get_queryset(query, info)
+
+    def resolve_programme_members(self, info, **kwargs):
+        user = info.context.user
+        Query._check_permissions(user, Programme.get_rights("update"))
+        programme_id = kwargs.get("programme_id")
+        assert_can_manage_programme(user, programme_id)
+        query = UserProgramme.objects.filter(
+            programme_id=programme_id, is_deleted=False,
+        ).select_related("user", "user__i_user").order_by("user__username")
+        return gql_optimizer.query(query, info)
+
 
 class Mutation(graphene.ObjectType):
     create_benefit_plan = CreateBenefitPlanMutation.Field()
@@ -709,6 +761,7 @@ class Mutation(graphene.ObjectType):
     delete_benefit_plan = DeleteBenefitPlanMutation.Field()
     undo_delete_benefit_plan = UndoDeleteBenefitPlanMutation.Field()
     close_benefit_plan = CloseBenefitPlanMutation.Field()
+    set_benefit_plan_programme = SetBenefitPlanProgrammeMutation.Field()
 
     create_beneficiary = CreateBeneficiaryMutation.Field()
     update_beneficiary = UpdateBeneficiaryMutation.Field()
@@ -731,3 +784,10 @@ class Mutation(graphene.ObjectType):
     bulk_update_group_beneficiary_time_entries = (
         BulkUpdateGroupBeneficiaryTimeEntriesMutation.Field()
     )
+
+    create_programme = CreateProgrammeMutation.Field()
+    update_programme = UpdateProgrammeMutation.Field()
+    delete_programme = DeleteProgrammeMutation.Field()
+    add_programme_members = AddProgrammeMembersMutation.Field()
+    remove_programme_members = RemoveProgrammeMembersMutation.Field()
+    set_my_default_programme = SetMyDefaultProgrammeMutation.Field()
