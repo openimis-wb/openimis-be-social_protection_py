@@ -17,5 +17,6 @@ from .programme_type_scope_test import ProgrammeTypeScopeTest
 from .programme_write_scope_test import (
     ProgrammeWriteScopeTest, ProgrammeFlowTaskTest, ProgrammeRestScopeTest, ZeroProgrammeWriteCostTest,
 )
+from .attach_programme_command_test import AttachProgrammeCommandTest
 # TODO: implement group upload workflow
 # from .group_import_gql_test import GroupBeneficiaryImportGQLTest
