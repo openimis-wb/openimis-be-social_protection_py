@@ -344,17 +344,6 @@ class ProjectEnrollmentService:
         project = Project.objects.get(id=project_id)
         enrollment_model = self.config['enrollment_model']
         fk_field = self.config['fk_field']
-        if write_scope(self.user) is not None:
-            beneficiary_model = enrollment_model._meta.get_field(
-                fk_field[:-len('_id')]
-            ).related_model
-            assert_benefit_plans_in_scope(self.user, {
-                project.benefit_plan_id,
-                *beneficiary_model.objects.filter(
-                    id__in=beneficiary_ids
-                ).values_list('benefit_plan_id', flat=True),
-            })
-
         # including deleted
         all_enrollments = {
             getattr(e, fk_field): e
@@ -367,6 +356,19 @@ class ProjectEnrollmentService:
 
         to_enroll = beneficiary_ids - currently_enrolled
         to_unenroll = currently_enrolled - beneficiary_ids
+
+        if write_scope(self.user) is not None:
+            beneficiary_model = enrollment_model._meta.get_field(
+                fk_field[:-len('_id')]
+            ).related_model
+            # An enrollment belongs to the project's benefit plan and to its
+            # beneficiary's: the call writes the enrollments it removes too.
+            assert_benefit_plans_in_scope(self.user, {
+                project.benefit_plan_id,
+                *beneficiary_model.objects.filter(
+                    id__in=beneficiary_ids | to_unenroll
+                ).values_list('benefit_plan_id', flat=True),
+            })
 
         if not project.allows_multiple_enrollments and to_enroll:
             already_enrolled_elsewhere = set(

@@ -303,6 +303,15 @@ class ProgrammeWriteScopeTest(TestCase):
             }]})
         self.assertFalse(BeneficiaryProjectTimeEntry.objects.filter(enrollment=cross).exists())
 
+    def test_unenrolling_a_beneficiary_of_another_programme_is_refused(self):
+        cross = BeneficiaryProjectEnrollment(beneficiary_id=self.beneficiary_b_id, project=self.project_a)
+        cross.save(username=self.admin.username)
+        service = ProjectEnrollmentService(self.member, ProjectEnrollmentService.INDIVIDUAL)
+        with self.assertRaisesMessage(ProgrammeScopeError, OUT_OF_SCOPE_MESSAGE):
+            service.enroll_project({"project_id": self.project_a.id, "ids": []})
+        self.assertFalse(BeneficiaryProjectEnrollment.objects.get(id=cross.id).is_deleted)
+        self.assertFalse(BeneficiaryProjectEnrollment.objects.get(id=self.enrollment_a.id).is_deleted)
+
     # Imports, tasks, workflows
 
     def test_import_service_entry_points_are_refused_out_of_scope(self):
